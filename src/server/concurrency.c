@@ -58,7 +58,7 @@ int acquireReadLock(const char *path)
     }
 
     // Cannot read if write is active
-    if (l->writeLock == 1) {    // We need to chekc just for write lock in this case
+    if (l->writeLock == 1) {    // We need to check just for write lock in this case
         return -1;
     }
 

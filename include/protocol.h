@@ -20,6 +20,8 @@
 #define CMD_TRANSFER_REQ   14
 #define CMD_ACCEPT         15
 #define CMD_REJECT         16
+#define CMD_UPLOAD         17
+#define CMD_DOWNLOAD       18
 
 // Simple status responses from the server (Same with integers we can send the status from server to client)
 #define STATUS_OK          1
@@ -36,6 +38,7 @@ typedef struct {
     int optionValue;              // option value
     char arg1[ARG_SIZE];          // first argument (path or username)
     char arg2[ARG_SIZE];          // second argument
+    char arg3[ARG_SIZE];          // third argument
 } ProtocolMessage;
 
 // Structure representing a server response

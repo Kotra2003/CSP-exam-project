@@ -41,4 +41,8 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session);
 // Delete file
 int handleDelete(int clientFd, ProtocolMessage *msg, Session *session);
 
+int handleUpload(int clientFd, ProtocolMessage *msg, Session *session);
+
+int handleDownload(int clientFd, ProtocolMessage *msg, Session *session);
+
 #endif

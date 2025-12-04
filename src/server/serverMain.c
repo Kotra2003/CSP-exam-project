@@ -9,6 +9,7 @@
 
 #include "../../include/network.h"
 #include "../../include/protocol.h"
+#include "../../include/concurrency.h"
 
 
 // Handle SIGCHLD to avoid zombie processes
@@ -17,6 +18,8 @@ void handleChild(int sig)
     // Wait for any child process (non-blocking)
     while (waitpid(-1, NULL, WNOHANG) > 0) {}
 }
+
+const char *gRootDir = NULL;
 
 int main(int argc, char *argv[])
 {
@@ -43,6 +46,8 @@ int main(int argc, char *argv[])
         }
         printf("Root directory %s created.\n", rootDir);
     }
+
+    gRootDir = rootDir;
 
     // Install SIGCHLD handler to clean up child processes
     signal(SIGCHLD, handleChild);
