@@ -10,7 +10,7 @@
 
 int main()
 {
-    int sock = connectToServer("127.0.0.1", 9000);
+    int sock = connectToServer("127.0.0.1", 8080);
     if (sock < 0) {
         printf("Could not connect to server.\n");
         return 1;
