@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <bits/waitflags.h>
+#include <sys/wait.h>
 
 #include "../../include/network.h"
 #include "../../include/protocol.h"

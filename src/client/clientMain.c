@@ -3,82 +3,76 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../../include/network.h"
 #include "../../include/protocol.h"
+#include "../../include/utils.h"
+#include "../../include/networkClient.h"
+#include "../../include/clientCommands.h"
 
-int main(int argc, char *argv[])
+int main()
 {
-    // Check arguments
-    if (argc < 3) {
-        printf("Usage: %s <IP> <port>\n", argv[0]);
-        return 1;
-    }
-
-    const char *ip = argv[1];
-    int port = atoi(argv[2]);   // We need a number so we do ASCII to integer
-
-    // Connect to server
-    int sock = connectToServer(ip, port);
+    int sock = connectToServer("127.0.0.1", 9000);
     if (sock < 0) {
-        printf("Failed to connect to server.\n");
+        printf("Could not connect to server.\n");
         return 1;
     }
 
-    printf("Connected to server %s:%d\n", ip, port);
+    printf("Connected to server.\n");
 
-    // Buffer for client input
-    char input[256];
+    char input[512];
 
-    while (1) {
+    while (1)
+    {
         printf("> ");
-        fflush(stdout);     // Fast buffer clean 
+        fflush(stdout);
 
-        // Read user input
-        if (fgets(input, sizeof(input), stdin) == NULL) {
-            printf("Input error.\n");
+        if (!fgets(input, sizeof(input), stdin))
             break;
-        }
 
         // Remove newline
-        input[strcspn(input, "\n")] = 0;    // We want to delte \n form input, which we got from fgets once we pressed enter
+        input[strcspn(input, "\n")] = '\0';
 
-        // Prepare protocol message
-        ProtocolMessage msg;
-        memset(&msg, 0, sizeof(msg));
-
-        // Simple placeholder parsing
-        // We can't imediatly close socket! We need to send command to server so it also closes clients socket on servers side
-        if (strcmp(input, "exit") == 0) {
-            msg.command = CMD_EXIT;
-        } else {
-            printf("Unknown command (for now only 'exit' works).\n");
+        // ---------------------------------------------------------
+        //                      UPLOAD
+        // ---------------------------------------------------------
+        if (strncmp(input, "upload ", 7) == 0) {
+            char local[256], remote[256];
+            if (sscanf(input + 7, "%s %s", local, remote) == 2) {
+                clientUpload(sock, local, remote);
+            } else {
+                printf("Usage: upload <local> <remote>\n");
+            }
             continue;
         }
 
-        // Send message to server
-        if (sendMessage(sock, &msg) < 0) {
-            printf("Connection lost.\n");
-            break;
+        // ---------------------------------------------------------
+        //                      DOWNLOAD
+        // ---------------------------------------------------------
+        if (strncmp(input, "download ", 9) == 0) {
+            char remote[256], local[256];
+            if (sscanf(input + 9, "%s %s", remote, local) == 2) {
+                clientDownload(sock, remote, local);
+            } else {
+                printf("Usage: download <remote> <local>\n");
+            }
+            continue;
         }
 
-        // Receive server response
-        ProtocolResponse res;
-        if (receiveResponse(sock, &res) < 0) {
-            printf("Server closed connection.\n");
-            break;
-        }
+        // ---------------------------------------------------------
+        //        ALL OTHER SIMPLE COMMANDS (login, list, cd…)
+        // ---------------------------------------------------------
+        ProtocolMessage msg;
+        memset(&msg, 0, sizeof(msg));
 
-        // Print server response
-        if (res.status == STATUS_OK) {
-            printf("OK\n");
-        } else {
-            printf("ERROR\n");
-        }
+        // Parse: command arg1 arg2 arg3
+        // Example: 3 folder 755 dir
+        sscanf(input, "%d %s %s %s",
+               &msg.command,
+               msg.arg1, msg.arg2, msg.arg3);
 
-        // If exit, break the loop
-        if (msg.command == CMD_EXIT) {
+        int status = clientSendSimple(sock, &msg);
+
+        if (msg.command == CMD_EXIT)
             break;
-        }
     }
 
     close(sock);

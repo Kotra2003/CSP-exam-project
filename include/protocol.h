@@ -20,8 +20,6 @@
 #define CMD_TRANSFER_REQ   14
 #define CMD_ACCEPT         15
 #define CMD_REJECT         16
-#define CMD_UPLOAD         17
-#define CMD_DOWNLOAD       18
 
 // Simple status responses from the server (Same with integers we can send the status from server to client)
 #define STATUS_OK          1

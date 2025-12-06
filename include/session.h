@@ -2,7 +2,7 @@
 #define SESSION_H
 
 #define USERNAME_SIZE 64
-#define PATH_SIZE 512
+#define PATH_SIZE 1024
 
 // Structure representing one user's session
 typedef struct {

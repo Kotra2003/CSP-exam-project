@@ -10,24 +10,72 @@
 // Build a full resolved path based on session and client input
 int resolvePath(Session *s, const char *inputPath, char *outputPath)
 {
-    // For now: simple join with currentDir
-    // Later we add real path sanitization
+    char temp[PATH_SIZE];   // Where we are going to store the path
+
+    // Case 1: absolute path
     if (inputPath[0] == '/') {
-        snprintf(outputPath, PATH_SIZE, "%s", inputPath);
-    } else {
-        snprintf(outputPath, PATH_SIZE, "%s/%s", s->currentDir, inputPath);
+        strncpy(temp, inputPath, PATH_SIZE);
+    } 
+    else {
+        // Relative path → base is currentDir
+        snprintf(temp, PATH_SIZE, "%s/%s", s->currentDir, inputPath);
     }
 
+    // We want to get rid of . and ..
+    char normalized[PATH_SIZE]; // This is going to represent a used path
+    char *tokens[256];  // We need pointers to cut diff parts of path
+    int count = 0;  // How many parts of path we are going to have
+
+    char *p = strtok(temp, "/");    // Cutting path by / (in the end we just get parts like names of directives and also .. or .)
+    while (p != NULL) {
+        if (strcmp(p, ".") == 0) {
+
+        }
+        else if (strcmp(p, "..") == 0) {
+            if (count > 0) count--;     // We can't skip it because it represents specific movement
+        }
+        else {
+            tokens[count++] = p;
+        }
+        p = strtok(NULL, "/");  // We want to start from the part where we have ended last time
+    }
+
+    // Reuilding normalized path (Just a path without . or ..)
+    strcpy(normalized, "");
+    for (int i = 0; i < count; i++) {
+        strcat(normalized, "/");
+        strcat(normalized, tokens[i]);  
+    }
+
+    // If nothing inside → "/" (just in case)
+    if (count == 0)
+        strcpy(normalized, "/");
+
+    strncpy(outputPath, normalized, PATH_SIZE);
     return 0;
 }
+
 
 // Check if fullPath is inside rootDir
 int isInsideRoot(const char *rootDir, const char *fullPath)
 {
-    // Placeholder: real logic later
-    // For now always return inside
-    return 1;
+    int len = strlen(rootDir);
+
+    // Special case rootDir ending with '/'
+    if (rootDir[len - 1] == '/')
+        return strncmp(rootDir, fullPath, len) == 0;
+
+    // We need to be sure that path where we want to go starts with rootDir
+    if (strncmp(rootDir, fullPath, len) != 0)
+        return 0;
+
+    // We need to be sure that path ends with / or \0 to be sure that for example rootDir/something../etc isn't possibile
+    if (fullPath[len] == '\0' || fullPath[len] == '/')
+        return 1;
+
+    return 0;
 }
+
 
 // Create a file or directory
 int fsCreate(const char *path, int permissions, int isDirectory)

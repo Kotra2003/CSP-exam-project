@@ -73,3 +73,27 @@ int acceptClient(int serverFd)
 
     return clientFd;
 }
+
+int sendAll(int sock, const void *buffer, int size)
+{
+    int total = 0;
+
+    while (total < size) {
+        int sent = send(sock, (char*)buffer + total, size - total, 0);
+        if (sent <= 0) return -1;
+        total += sent;
+    }
+    return 0;
+}
+
+int recvAll(int sock, void *buffer, int size)
+{
+    int total = 0;
+
+    while (total < size) {
+        int received = recv(sock, (char*)buffer + total, size - total, 0);
+        if (received <= 0) return -1;
+        total += received;
+    }
+    return 0;
+}
