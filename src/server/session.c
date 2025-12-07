@@ -35,12 +35,13 @@ int loginUser(Session *s, const char *rootDir, const char *username)
 }
 
 // Change directory inside session
-int changeDirectory(Session *s, const char *newPath)
+int changeDirectory(Session *s, const char *newAbsPath)
 {
-    // Simple replace for now; we will later add full path resolution
-    snprintf(s->currentDir, PATH_SIZE, "%s", newPath);
+    // MUST be absolute AND inside homeDir
+    strncpy(s->currentDir, newAbsPath, PATH_SIZE);
     return 0;
 }
+
 
 // Build an absolute path from user input path
 int buildFullPath(Session *s, const char *userPath, char *outputPath)

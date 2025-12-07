@@ -8,7 +8,9 @@ SERVER_SOURCES = \
     src/server/session.c \
     src/server/fsOps.c \
     src/server/utils.c \
-    src/server/concurrency.c
+    src/server/concurrency.c \
+    src/server/serverCommands.c \
+
 
 CLIENT_SOURCES = \
     src/client/clientMain.c \

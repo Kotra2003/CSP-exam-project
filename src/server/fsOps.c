@@ -10,44 +10,46 @@
 // Build a full resolved path based on session and client input
 int resolvePath(Session *s, const char *inputPath, char *outputPath)
 {
-    char temp[PATH_SIZE];   // Where we are going to store the path
+    char temp[PATH_SIZE];
 
-    // Case 1: absolute path
+    // Absolute path → use as-is
     if (inputPath[0] == '/') {
-        strncpy(temp, inputPath, PATH_SIZE);
-    } 
+        snprintf(temp, PATH_SIZE, "%s", inputPath);
+    }
     else {
-        // Relative path → base is currentDir
+        // Relative path → prefix with currentDir
         snprintf(temp, PATH_SIZE, "%s/%s", s->currentDir, inputPath);
     }
 
-    // We want to get rid of . and ..
-    char normalized[PATH_SIZE]; // This is going to represent a used path
-    char *tokens[256];  // We need pointers to cut diff parts of path
-    int count = 0;  // How many parts of path we are going to have
+    // Normalize: remove "." and ".." safely
+    char normalized[PATH_SIZE] = "";
+    char *parts[256];
+    int count = 0;
 
-    char *p = strtok(temp, "/");    // Cutting path by / (in the end we just get parts like names of directives and also .. or .)
-    while (p != NULL) {
+    char work[PATH_SIZE];
+    strncpy(work, temp, PATH_SIZE);
+
+    char *p = strtok(work, "/");
+    while (p) {
         if (strcmp(p, ".") == 0) {
-
+            // skip
         }
         else if (strcmp(p, "..") == 0) {
-            if (count > 0) count--;     // We can't skip it because it represents specific movement
+            if (count > 0) count--;
         }
         else {
-            tokens[count++] = p;
+            parts[count++] = p;
         }
-        p = strtok(NULL, "/");  // We want to start from the part where we have ended last time
+        p = strtok(NULL, "/");
     }
 
-    // Reuilding normalized path (Just a path without . or ..)
+    // Rebuild absolute normalized path
     strcpy(normalized, "");
     for (int i = 0; i < count; i++) {
         strcat(normalized, "/");
-        strcat(normalized, tokens[i]);  
+        strcat(normalized, parts[i]);
     }
 
-    // If nothing inside → "/" (just in case)
     if (count == 0)
         strcpy(normalized, "/");
 
@@ -56,25 +58,26 @@ int resolvePath(Session *s, const char *inputPath, char *outputPath)
 }
 
 
+
 // Check if fullPath is inside rootDir
 int isInsideRoot(const char *rootDir, const char *fullPath)
 {
     int len = strlen(rootDir);
 
-    // Special case rootDir ending with '/'
-    if (rootDir[len - 1] == '/')
-        return strncmp(rootDir, fullPath, len) == 0;
-
-    // We need to be sure that path where we want to go starts with rootDir
+    // Must begin with rootDir
     if (strncmp(rootDir, fullPath, len) != 0)
         return 0;
 
-    // We need to be sure that path ends with / or \0 to be sure that for example rootDir/something../etc isn't possibile
+    // Accept:
+    //   /rootDir
+    //   /rootDir/
+    //   /rootDir/folder
     if (fullPath[len] == '\0' || fullPath[len] == '/')
         return 1;
 
     return 0;
 }
+
 
 
 // Create a file or directory
