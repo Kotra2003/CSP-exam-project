@@ -12,6 +12,9 @@ int processCommand(int clientFd, ProtocolMessage *msg, Session *session);
 int handleLogin(int clientFd, ProtocolMessage *msg, Session *session);
 int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session);
 
+// User management (naš dodatak)
+int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session);
+
 // File / directory management
 int handleCreate(int clientFd, ProtocolMessage *msg, Session *session);
 int handleChmod(int clientFd, ProtocolMessage *msg, Session *session);

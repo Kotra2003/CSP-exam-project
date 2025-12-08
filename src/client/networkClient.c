@@ -6,6 +6,7 @@
 
 #include "../../include/networkClient.h"
 #include "../../include/network.h"
+#include "../../include/protocol.h"
 
 // ------------------------------------------------------------
 // Connect to server
@@ -85,6 +86,93 @@ int recvAll(int sock, void *buffer, int size)
 
         total += r;
     }
+
+    return 0;
+}
+
+// ------------------------------------------------------------
+// UPLOAD FILE (client → server)
+// ------------------------------------------------------------
+int uploadFile(int sock, const char *localPath, const char *remotePath)
+{
+    FILE *f = fopen(localPath, "rb");
+    if (!f) {
+        perror("fopen");
+        return -1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    int size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    // Send upload command
+    ProtocolMessage msg;
+    memset(&msg, 0, sizeof(msg));
+
+    msg.command = CMD_UPLOAD;
+    strncpy(msg.arg1, remotePath, sizeof(msg.arg1));
+    snprintf(msg.arg2, sizeof(msg.arg2), "%d", size);
+
+    send(sock, &msg, sizeof(msg), 0);
+
+    // Receive OK from server
+    ProtocolResponse res;
+    if (recv(sock, &res, sizeof(res), 0) <= 0 || res.status != STATUS_OK) {
+        printf("[UPLOAD] server refused upload\n");
+        fclose(f);
+        return -1;
+    }
+
+    // Send file content
+    char *buffer = malloc(size);
+    fread(buffer, 1, size, f);
+    fclose(f);
+
+    sendAll(sock, buffer, size);
+    free(buffer);
+
+    // Receive final OK
+    recv(sock, &res, sizeof(res), 0);
+    return (res.status == STATUS_OK) ? 0 : -1;
+}
+
+// ------------------------------------------------------------
+// DOWNLOAD FILE (server → client)
+// ------------------------------------------------------------
+int downloadFile(int sock, const char *remotePath, const char *localPath)
+{
+    // Send download command
+    ProtocolMessage msg;
+    memset(&msg, 0, sizeof(msg));
+
+    msg.command = CMD_DOWNLOAD;
+    strncpy(msg.arg1, remotePath, sizeof(msg.arg1));
+
+    send(sock, &msg, sizeof(msg), 0);
+
+    // Receive server response
+    ProtocolResponse res;
+    if (recv(sock, &res, sizeof(res), 0) <= 0 || res.status != STATUS_OK) {
+        printf("[DOWNLOAD] server refused\n");
+        return -1;
+    }
+
+    int size = res.dataSize;
+    if (size <= 0) return -1;
+
+    char *buffer = malloc(size);
+    recvAll(sock, buffer, size);
+
+    FILE *f = fopen(localPath, "wb");
+    if (!f) {
+        perror("fopen");
+        free(buffer);
+        return -1;
+    }
+
+    fwrite(buffer, 1, size, f);
+    fclose(f);
+    free(buffer);
 
     return 0;
 }

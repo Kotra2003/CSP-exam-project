@@ -18,6 +18,7 @@
 #define CMD_UPLOAD         11
 #define CMD_DOWNLOAD       12
 #define CMD_TRANSFER_REQ   13   // rezervisano za napredne funkcije
+#define CMD_DELETE_USER    14   // nas dodatak: brisanje korisnika
 
 // ==============================
 // Status codes

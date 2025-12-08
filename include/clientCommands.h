@@ -3,13 +3,10 @@
 
 #include "protocol.h"
 
-// Upload local file → remote path
+int clientHandleInput(int sock, char *input);
+
+// upload/download implementirani u networkClient.c
 int clientUpload(int sock, const char *localPath, const char *remotePath);
-
-// Download remote file → local path
 int clientDownload(int sock, const char *remotePath, const char *localPath);
-
-// Generic sender for simple commands (login, create, cd, chmod, delete, move, list, read, write)
-int clientSendSimple(int sock, ProtocolMessage *msg);
 
 #endif

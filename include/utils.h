@@ -1,6 +1,8 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#include "session.h"
+
 // Remove trailing newline (if present)
 void removeNewline(char *str);
 
@@ -15,5 +17,9 @@ int generateId();
 
 // Check if file or directory exists
 int fileExists(const char *path);
+
+// Recursively remove file or directory tree (rm -rf style).
+// Returns 0 on success, -1 on error.
+int removeRecursive(const char *path);
 
 #endif

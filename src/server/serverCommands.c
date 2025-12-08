@@ -5,6 +5,10 @@
 #include <dirent.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <pwd.h>
+#include <grp.h>
 
 #include "../../include/serverCommands.h"
 #include "../../include/protocol.h"
@@ -13,7 +17,6 @@
 #include "../../include/fsOps.h"
 #include "../../include/concurrency.h"
 #include "../../include/network.h"
-
 
 extern const char *gRootDir;
 
@@ -70,6 +73,7 @@ int processCommand(int clientFd, ProtocolMessage *msg, Session *session)
     {
         case CMD_LOGIN:       return handleLogin(clientFd, msg, session);
         case CMD_CREATE_USER: return handleCreateUser(clientFd, msg, session);
+        case CMD_DELETE_USER: return handleDeleteUser(clientFd, msg, session);
         case CMD_CREATE:      return handleCreate(clientFd, msg, session);
         case CMD_CHMOD:       return handleChmod(clientFd, msg, session);
         case CMD_MOVE:        return handleMove(clientFd, msg, session);
@@ -131,26 +135,91 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("CREATE_USER", msg, session);
 
-    if (msg->arg1[0] == '\0') {
+    if (msg->arg1[0] == '\0' || msg->arg2[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    char path[PATH_SIZE];
-    snprintf(path, PATH_SIZE, "%s/%s", gRootDir, msg->arg1);
+    const char *username = msg->arg1;
+    int permissions = (int)strtol(msg->arg2, NULL, 8);
 
-    if (fileExists(path)) {
-        printf("[CREATE_USER] ERROR exists '%s'\n", path);
+    if (permissions <= 0) {
+        printf("[CREATE_USER] ERROR invalid permissions\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    if (mkdir(path, 0700) < 0) {
+    char homePath[PATH_SIZE];
+    snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, username);
+
+    if (fileExists(homePath)) {
+        printf("[CREATE_USER] ERROR: '%s' exists\n", homePath);
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    // 1) SYSTEM USER CREATION
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+    if (pid == 0) {
+        execlp("adduser", "adduser",
+               "--disabled-password",
+               "--gecos", "",
+               username,
+               NULL);
+        perror("execlp adduser");
+        exit(1);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        printf("[CREATE_USER] adduser failed\n");
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    // 2) CREATE HOME DIRECTORY
+    if (mkdir(homePath, permissions) < 0) {
         perror("mkdir");
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 3) SET PERMISSIONS
+    if (chmod(homePath, permissions) < 0) {
+        perror("chmod");
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    // 4) SET OWNER TO THIS USER + SHARED GROUP
+    struct group *grp = getgrnam("csapgroup");
+    if (!grp) {
+        printf("[CREATE_USER] ERROR: group csapgroup not found\n");
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    struct passwd *pwd = getpwnam(username);
+    if (!pwd) {
+        printf("[CREATE_USER] ERROR: passwd entry missing\n");
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    if (chown(homePath, pwd->pw_uid, grp->gr_gid) < 0) {
+        perror("chown");
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    printf("[CREATE_USER] OK user '%s' perms %o\n", username, permissions);
     sendOk(clientFd, 0);
     return 0;
 }
@@ -271,7 +340,6 @@ int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // STRIKTNI LOCK za oba fajla
     if (acquireFileLock(src) < 0 || acquireFileLock(dst) < 0) {
         releaseFileLock(src);
         releaseFileLock(dst);
@@ -340,43 +408,68 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
 
     char fullPath[PATH_SIZE];
-    char buffer[4096];
-    buffer[0] = '\0';
+    char output[8192];
+    output[0] = '\0';
 
     if (msg->arg1[0] == '\0') {
         strncpy(fullPath, session->currentDir, PATH_SIZE);
     } else {
-        if (resolvePath(session, msg->arg1, fullPath) < 0)
-            return sendErrorMsg(clientFd), 0;
+        if (resolvePath(session, msg->arg1, fullPath) < 0) {
+            sendErrorMsg(clientFd);
+            return 0;
+        }
     }
 
-    if (!isInsideRoot(session->homeDir, fullPath)) {
-        return sendErrorMsg(clientFd), 0;
+    if (!isInsideRoot(gRootDir, fullPath)) {
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
     DIR *dir = opendir(fullPath);
     if (!dir) {
-        return sendErrorMsg(clientFd), 0;
+        perror("opendir");
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
     struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") &&
-            strcmp(entry->d_name, "..")) {
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+            continue;
 
-            strcat(buffer, entry->d_name);
-            strcat(buffer, "\n");
-        }
+        char entryPath[PATH_SIZE];
+        snprintf(entryPath, PATH_SIZE, "%s/%s", fullPath, entry->d_name);
+
+        struct stat st;
+        if (stat(entryPath, &st) < 0)
+            continue;
+
+        int perms = st.st_mode & 0777;
+        long size = (long)st.st_size;
+
+        char line[512];
+        snprintf(line, sizeof(line),
+                 "%s  %03o  %ld\n",
+                 entry->d_name,
+                 perms,
+                 size);
+
+        strncat(output, line, sizeof(output) - strlen(output) - 1);
     }
+
     closedir(dir);
 
-    sendOk(clientFd, strlen(buffer));
-    send(clientFd, buffer, strlen(buffer), 0);
+    sendOk(clientFd, strlen(output));
+    if (strlen(output) > 0) {
+        sendAll(clientFd, output, strlen(output));
+    }
+
     return 0;
 }
 
 // ================================================================
-// READ
+// READ  (PDF: read <path>, read -offset=N <path>)
 // ================================================================
 int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
 {
@@ -385,52 +478,80 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
     if (!ensureLoggedIn(clientFd, session, "READ"))
         return 0;
 
-    if (!msg->arg1[0] || !msg->arg2[0] || !msg->arg3[0])
-        return sendErrorMsg(clientFd), 0;
+    if (msg->arg1[0] == '\0') {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
 
     char fullPath[PATH_SIZE];
+
     if (resolvePath(session, msg->arg1, fullPath) < 0 ||
         !isInsideRoot(session->homeDir, fullPath) ||
         !fileExists(fullPath)) {
 
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
-    int offset = atoi(msg->arg2);
-    int size = atoi(msg->arg3);
-    if (size <= 0)
-        return sendErrorMsg(clientFd), 0;
+    int offset = 0;
+    if (msg->arg2[0] != '\0') {
+        offset = atoi(msg->arg2);
+        if (offset < 0) offset = 0;
+    }
 
-    // STRIKT LOCK
+    struct stat st;
+    if (stat(fullPath, &st) < 0 || !S_ISREG(st.st_mode)) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    int fileSize = (int)st.st_size;
+    if (offset > fileSize) offset = fileSize;
+
+    int toRead = fileSize - offset;
+
     if (acquireFileLock(fullPath) < 0) {
-        printf("[READ] file locked '%s'\n", fullPath);
-        return sendErrorMsg(clientFd), 0;
+        printf("[READ] file in use '%s'\n", fullPath);
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
-    char *buffer = malloc(size);
-    if (!buffer) {
-        releaseFileLock(fullPath);
-        return sendErrorMsg(clientFd), 0;
-    }
+    char *buffer = NULL;
+    int readBytes = 0;
 
-    int readBytes = fsReadFile(fullPath, buffer, size, offset);
-    if (readBytes < 0) {
-        free(buffer);
-        releaseFileLock(fullPath);
-        return sendErrorMsg(clientFd), 0;
+    if (toRead > 0) {
+        buffer = malloc(toRead);
+        if (!buffer) {
+            releaseFileLock(fullPath);
+            sendErrorMsg(clientFd);
+            return 0;
+        }
+
+        readBytes = fsReadFile(fullPath, buffer, toRead, offset);
+        if (readBytes < 0) {
+            free(buffer);
+            releaseFileLock(fullPath);
+            sendErrorMsg(clientFd);
+            return 0;
+        }
     }
 
     releaseFileLock(fullPath);
 
     sendOk(clientFd, readBytes);
-    send(clientFd, buffer, readBytes, 0);
 
-    free(buffer);
+    if (readBytes > 0) {
+        sendAll(clientFd, buffer, readBytes);
+        free(buffer);
+    }
+
+    printf("[READ] %d bytes from '%s' (offset=%d)\n", readBytes, fullPath, offset);
     return 0;
 }
 
 // ================================================================
-// WRITE
+// WRITE  (PDF: write <path>, write -offset=N <path>)
+// VARIJANTA 1: client šalje VELIČINU + PODATKE
 // ================================================================
 int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 {
@@ -439,58 +560,86 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
     if (!ensureLoggedIn(clientFd, session, "WRITE"))
         return 0;
 
+    if (msg->arg1[0] == '\0') {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
     char fullPath[PATH_SIZE];
-
-    if (!msg->arg1[0] || !msg->arg2[0] || !msg->arg3[0])
-        return sendErrorMsg(clientFd), 0;
-
-    int offset = atoi(msg->arg2);
-    int size = atoi(msg->arg3);
-
-    if (size <= 0)
-        return sendErrorMsg(clientFd), 0;
 
     if (resolvePath(session, msg->arg1, fullPath) < 0 ||
         !isInsideRoot(session->homeDir, fullPath)) {
 
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
-    // STRICT EXCLUSIVE LOCK
+    int offset = 0;
+    if (msg->arg2[0] != '\0') {
+        offset = atoi(msg->arg2);
+        if (offset < 0) offset = 0;
+    }
+
     if (acquireFileLock(fullPath) < 0) {
         printf("[WRITE] file in use '%s'\n", fullPath);
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
-    // ACK before receiving data
+    // 1) Pošalji ACK da klijent može poslati veličinu + sadržaj
     sendOk(clientFd, 0);
 
-    char *buffer = malloc(size);
-    if (!buffer) {
+    // 2) Primi int size
+    int size = 0;
+    if (recvAll(clientFd, &size, sizeof(int)) < 0 || size < 0) {
+        printf("[WRITE] failed to receive size\n");
         releaseFileLock(fullPath);
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
-    if (recvAll(clientFd, buffer, size) < 0) {
+    char *buffer = NULL;
+    int written = 0;
+
+    if (size > 0) {
+        buffer = malloc(size);
+        if (!buffer) {
+            releaseFileLock(fullPath);
+            sendErrorMsg(clientFd);
+            return 0;
+        }
+
+        if (recvAll(clientFd, buffer, size) < 0) {
+            printf("[WRITE] failed to receive data\n");
+            free(buffer);
+            releaseFileLock(fullPath);
+            sendErrorMsg(clientFd);
+            return 0;
+        }
+
+        // fsWriteFile treba da:
+        //  - kreira fajl ako ne postoji (0700)
+        //  - piše od zadanog offseta
+        written = fsWriteFile(fullPath, buffer, size, offset);
+
         free(buffer);
-        releaseFileLock(fullPath);
-        return sendErrorMsg(clientFd), 0;
+
+        if (written < 0) {
+            releaseFileLock(fullPath);
+            sendErrorMsg(clientFd);
+            return 0;
+        }
     }
 
-    int written = fsWriteFile(fullPath, buffer, size, offset);
-
-    free(buffer);
     releaseFileLock(fullPath);
 
-    if (written < 0)
-        return sendErrorMsg(clientFd), 0;
-
     sendOk(clientFd, written);
+    printf("[WRITE] %d bytes -> '%s' (offset=%d)\n", written, fullPath, offset);
     return 0;
 }
 
 // ================================================================
-// DELETE
+// DELETE (delete file or directory inside user's home)
 // ================================================================
 int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
 {
@@ -499,50 +648,48 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
     if (!ensureLoggedIn(clientFd, session, "DELETE"))
         return 0;
 
+    if (msg->arg1[0] == '\0') {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
     char fullPath[PATH_SIZE];
 
-    if (!msg->arg1[0] ||
-        resolvePath(session, msg->arg1, fullPath) < 0 ||
+    // Resolve relative to user directory
+    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
         !isInsideRoot(session->homeDir, fullPath)) {
 
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
-    struct stat st;
-    if (stat(fullPath, &st) < 0)
-        return sendErrorMsg(clientFd), 0;
-
-    // If it's directory → ensure empty
-    if (S_ISDIR(st.st_mode)) {
-        DIR *dir = opendir(fullPath);
-        if (!dir) return sendErrorMsg(clientFd), 0;
-
-        struct dirent *e;
-        while ((e = readdir(dir)) != NULL) {
-            if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
-                closedir(dir);
-                return sendErrorMsg(clientFd), 0;
-            }
-        }
-        closedir(dir);
+    // Check existence
+    if (!fileExists(fullPath)) {
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
-    // STRICT LOCK
+    // Acquire lock to avoid races
     if (acquireFileLock(fullPath) < 0) {
         printf("[DELETE] file in use '%s'\n", fullPath);
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
-    int ok = fsDelete(fullPath);
+    int ok = removeRecursive(fullPath);
 
     releaseFileLock(fullPath);
 
-    if (ok < 0)
-        return sendErrorMsg(clientFd), 0;
+    if (ok < 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
 
+    printf("[DELETE] Removed '%s'\n", fullPath);
     sendOk(clientFd, 0);
     return 0;
 }
+
 
 // ================================================================
 // UPLOAD
@@ -557,19 +704,22 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
     char fullPath[PATH_SIZE];
     int size = atoi(msg->arg2);
 
-    if (!msg->arg1[0] || size <= 0)
-        return sendErrorMsg(clientFd), 0;
+    if (!msg->arg1[0] || size <= 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
 
     if (resolvePath(session, msg->arg1, fullPath) < 0 ||
         !isInsideRoot(session->homeDir, fullPath)) {
 
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
-    // LOCK
     if (acquireFileLock(fullPath) < 0) {
         printf("[UPLOAD] file in use '%s'\n", fullPath);
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
     sendOk(clientFd, 0); // tell client to send data
@@ -577,13 +727,15 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
     char *buffer = malloc(size);
     if (!buffer) {
         releaseFileLock(fullPath);
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
     if (recvAll(clientFd, buffer, size) < 0) {
         free(buffer);
         releaseFileLock(fullPath);
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
     int written = fsWriteFile(fullPath, buffer, size, 0);
@@ -591,8 +743,10 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
     free(buffer);
     releaseFileLock(fullPath);
 
-    if (written < 0)
-        return sendErrorMsg(clientFd), 0;
+    if (written < 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
 
     sendOk(clientFd, written);
     return 0;
@@ -614,25 +768,29 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
         resolvePath(session, msg->arg1, fullPath) < 0 ||
         !isInsideRoot(session->homeDir, fullPath)) {
 
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
     struct stat st;
-    if (stat(fullPath, &st) < 0 || !S_ISREG(st.st_mode))
-        return sendErrorMsg(clientFd), 0;
+    if (stat(fullPath, &st) < 0 || !S_ISREG(st.st_mode)) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
 
-    int size = st.st_size;
+    int size = (int)st.st_size;
 
-    // LOCK
     if (acquireFileLock(fullPath) < 0) {
         printf("[DOWNLOAD] file in use '%s'\n", fullPath);
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
     char *buffer = malloc(size);
     if (!buffer) {
         releaseFileLock(fullPath);
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
     int readBytes = fsReadFile(fullPath, buffer, size, 0);
@@ -641,12 +799,73 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 
     if (readBytes < 0) {
         free(buffer);
-        return sendErrorMsg(clientFd), 0;
+        sendErrorMsg(clientFd);
+        return 0;
     }
 
     sendOk(clientFd, readBytes);
-    send(clientFd, buffer, readBytes, 0);
+    sendAll(clientFd, buffer, readBytes);
 
     free(buffer);
+    return 0;
+}
+
+// ================================================================
+// DELETE USER
+// ================================================================
+int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
+{
+    debugCommand("DELETE_USER", msg, session);
+
+    if (!session->isLoggedIn  || strcmp(session->username, "admin") != 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    if (msg->arg1[0] == '\0') {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    const char *target = msg->arg1;
+
+    if (strcmp(target, "admin") == 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    char homePath[PATH_SIZE];
+    snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, target);
+
+    if (!fileExists(homePath)) {
+        printf("[DELETE_USER] No such user dir: %s\n", homePath);
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("userdel", "userdel", "-f", target, NULL);
+        perror("userdel");
+        exit(1);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        printf("[DELETE_USER] userdel failed\n");
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    if (removeRecursive(homePath) < 0) {
+        printf("[DELETE_USER] rm -rf failed: %s\n", homePath);
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    printf("[DELETE_USER] '%s' deleted successfully\n", target);
+    sendOk(clientFd, 0);
     return 0;
 }
