@@ -5,8 +5,9 @@
 #include <unistd.h>
 
 #include "../../include/utils.h"
+#include "../../include/session.h"
 
-// Remove newline at end of string
+// Remove newline at the end of a string (if exists)
 void removeNewline(char *str)
 {
     int len = strlen(str);
@@ -15,31 +16,39 @@ void removeNewline(char *str)
     }
 }
 
-// Check if string contains only digits, if yes we can see it as a numerical and we can cast it
+// Check if a string contains only digits
 int isNumeric(const char *str)
 {
+    if (!str || *str == '\0')
+        return 0;
+
     for (int i = 0; str[i] != '\0'; i++) {
         if (str[i] < '0' || str[i] > '9')
-            return 0; // false
+            return 0;
     }
-    return 1; // true
+    return 1;
 }
 
-// Join base directory with child path (for example when we want to cd to diff directory)
+// Safely join two paths
 void joinPaths(const char *base, const char *child, char *output)
 {
-    snprintf(output, 512, "%s/%s", base, child);
+    // Caller ensures output buffer is big enough
+    if (child[0] == '\0') {
+        snprintf(output, PATH_SIZE, "%s", base);
+    } else {
+        snprintf(output, PATH_SIZE, "%s/%s", base, child);
+    }
 }
 
-// Generate a random ID (Only used in trafnsfer request form one user to another)
+// Simple random ID
 int generateId()
 {
-    return rand() % 1000000; // simple random number
+    return rand() % 1000000;
 }
 
-// Check if file exists
+// Check if file/directory exists
 int fileExists(const char *path)
 {
     struct stat st;
-    return stat(path, &st) == 0;
+    return (stat(path, &st) == 0);
 }

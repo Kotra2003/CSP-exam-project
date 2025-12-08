@@ -17,6 +17,7 @@ CLIENT_SOURCES = \
     src/client/clientCommands.c \
     src/client/networkClient.c \
     src/client/protocol.c \
+    src/server/utils.c
 
 SERVER_OBJECTS = $(SERVER_SOURCES:.c=.o)
 CLIENT_OBJECTS = $(CLIENT_SOURCES:.c=.o)

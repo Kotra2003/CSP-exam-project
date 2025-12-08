@@ -3,28 +3,21 @@
 
 #include "session.h"
 
-#define MAX_LOCKS 64
+#define MAX_LOCKS 128
 
-// Structure representing a lock entry for one file
 typedef struct {
-    char path[PATH_SIZE];    // file path
-    int readCount;           // number of readers
-    int writeLock;           // 1 if write lock active
+    char path[PATH_SIZE];   // file path being locked
+    int fd;                 // lock file descriptor
+    int locked;             // 1 if lock held by THIS process
 } FileLock;
 
-// Initialize lock system
+// Initialize local lock table
 void initLocks();
 
-// Try to acquire read lock, returns 0 if success, -1 if blocked
-int acquireReadLock(const char *path);
+// Acquire EXCLUSIVE lock. Returns 0 = success, -1 = fail.
+int acquireFileLock(const char *path);
 
-// Release read lock
-void releaseReadLock(const char *path);
-
-// Try to acquire write lock, returns 0 if success, -1 if blocked
-int acquireWriteLock(const char *path);
-
-// Release write lock
-void releaseWriteLock(const char *path);
+// Release EXCLUSIVE lock
+void releaseFileLock(const char *path);
 
 #endif

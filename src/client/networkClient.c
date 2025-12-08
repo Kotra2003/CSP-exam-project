@@ -4,76 +4,86 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
+#include "../../include/networkClient.h"
 #include "../../include/network.h"
 
-// Connect to the server using IP and port
+// ------------------------------------------------------------
+// Connect to server
+// ------------------------------------------------------------
 int connectToServer(const char *ip, int port)
 {
-    int sock;
-    struct sockaddr_in serverAddr;
-
-    // Create socket (socket for sending and listening)
-    sock = socket(AF_INET, SOCK_STREAM, 0);
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
-        // print simple error
         perror("socket");
         return -1;
     }
 
-    // Prepare server address (again we need to clean everything before use)
-    memset(&serverAddr, 0, sizeof(serverAddr));
-    serverAddr.sin_family = AF_INET;       // IPv4
-    serverAddr.sin_port = htons(port);     // Convert port to network byte order
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
 
-    // Convert IP string to binary format
-    if (inet_pton(AF_INET, ip, &serverAddr.sin_addr) <= 0) {
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
         perror("inet_pton");
         close(sock);
         return -1;
     }
 
-    // Try to connect to server (line bind on server side connect needs a address in binary to be stored)
-    if (connect(sock, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("connect");
         close(sock);
         return -1;
     }
 
-    // Successful connection
     return sock;
 }
 
-// Send all bytes to the socket (without this it is possible for send to send only a portion of data)
+// ------------------------------------------------------------
+// Reliable send
+// ------------------------------------------------------------
 int sendAll(int sock, const void *buffer, int size)
 {
-    int totalSent = 0;
+    int total = 0;
 
-    // Keep sending until everything is sent
-    while (totalSent < size) {
-        int sent = send(sock, (char *)buffer + totalSent, size - totalSent, 0);     // We want to be sure everything is sent and also sent in right order (not overwritten)
-        if (sent <= 0) {
-            perror("send");
+    while (total < size) {
+        int sent = send(sock, (char *)buffer + total, size - total, 0);
+
+        if (sent < 0) {
+            perror("sendAll");
             return -1;
         }
-        totalSent += sent;
+        if (sent == 0) {
+            fprintf(stderr, "sendAll: connection closed\n");
+            return -1;
+        }
+
+        total += sent;
     }
 
     return 0;
 }
 
-// Receive exactly size bytes from the socket
+// ------------------------------------------------------------
+// Reliable recv
+// ------------------------------------------------------------
 int recvAll(int sock, void *buffer, int size)
 {
-    int totalRecv = 0;
+    int total = 0;
 
-    // Keep receiving until all expected bytes arrive
-    while (totalRecv < size) {
-        int r = recv(sock, (char *)buffer + totalRecv, size - totalRecv, 0); // Like in sendAll we want to be sure noting is overwritten
-        if (r <= 0) {
-            perror("recv");
+    while (total < size) {
+        int r = recv(sock, (char *)buffer + total, size - total, 0);
+
+        if (r < 0) {
+            perror("recvAll");
             return -1;
         }
-        totalRecv += r;
+        if (r == 0) {
+            fprintf(stderr, "recvAll: connection closed\n");
+            return -1;
+        }
+
+        total += r;
     }
 
     return 0;

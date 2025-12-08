@@ -6,94 +6,120 @@
 
 #include "../../include/network.h"
 
-// Create a listening socket for the server
-int createServerSocket(const char *ip, int port) 
+// ------------------------------------------------------------
+// Create listening server socket
+// ------------------------------------------------------------
+int createServerSocket(const char *ip, int port)
 {
     int serverFd;
-    struct sockaddr_in address;
+    struct sockaddr_in addr;
 
-    // Create socket
     serverFd = socket(AF_INET, SOCK_STREAM, 0);
     if (serverFd < 0) {
-        // Simple error print
         perror("socket");
         return -1;
     }
 
-    // Allow quick reuse of the port
+    // Allow quick port reuse (important for dev/testing)
     int opt = 1;
-    setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt");
+        close(serverFd);
+        return -1;
+    }
 
-    // Set address info
-    memset(&address, 0, sizeof(address));   // Deleting all garbage from memeory (fresh start)
-    address.sin_family = AF_INET;       // IPv4 (We need to do it beceuse of many structures)
-    address.sin_port = htons(port);     // Convert port to network order (to  Big-endian)
+#ifdef SO_REUSEPORT
+    setsockopt(serverFd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
 
-    // Convert string IP to binary form
-    // ip -> address.sin_addr 
-    if (inet_pton(AF_INET, ip, &address.sin_addr) <= 0) {
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
         perror("inet_pton");
         close(serverFd);
         return -1;
     }
 
-    // Bind our new socket to IP and port
-    // To bind it we needed ip to be in binary
-    if (bind(serverFd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+    if (bind(serverFd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind");
         close(serverFd);
         return -1;
     }
 
-    // Put socket in listening mode
-    // We are creating 10 slots for listening or queue fo 10 slots (for 10 diff clients)
-    if (listen(serverFd, 10) < 0) {
+    if (listen(serverFd, 20) < 0) {
         perror("listen");
         close(serverFd);
         return -1;
     }
 
-    // Return the listening socket
     return serverFd;
 }
 
-// Accept a new client connection
-int acceptClient(int serverFd) 
+// ------------------------------------------------------------
+// Accept new client
+// ------------------------------------------------------------
+int acceptClient(int serverFd)
 {
-    struct sockaddr_in clientAddr;
-    socklen_t addrLen = sizeof(clientAddr);
+    struct sockaddr_in cliAddr;
+    socklen_t len = sizeof(cliAddr);
 
-    // Wait for a connection
-    // Creating a socket that is used for sending and receving data form clinet (we can have more of them)
-    int clientFd = accept(serverFd, (struct sockaddr *)&clientAddr, &addrLen);
-    if (clientFd < 0) {
+    int fd = accept(serverFd, (struct sockaddr *)&cliAddr, &len);
+    if (fd < 0) {
         perror("accept");
         return -1;
     }
 
-    return clientFd;
+    return fd;
 }
 
+// ------------------------------------------------------------
+// sendAll - send EXACTLY "size" bytes
+// ------------------------------------------------------------
 int sendAll(int sock, const void *buffer, int size)
 {
     int total = 0;
 
     while (total < size) {
-        int sent = send(sock, (char*)buffer + total, size - total, 0);
-        if (sent <= 0) return -1;
+        int sent = send(sock, (char *)buffer + total, size - total, 0);
+
+        if (sent < 0) {
+            perror("sendAll");
+            return -1;
+        }
+        if (sent == 0) {
+            fprintf(stderr, "sendAll: connection closed unexpectedly\n");
+            return -1;
+        }
+
         total += sent;
     }
+
     return 0;
 }
 
+// ------------------------------------------------------------
+// recvAll - receive EXACTLY "size" bytes
+// ------------------------------------------------------------
 int recvAll(int sock, void *buffer, int size)
 {
     int total = 0;
 
     while (total < size) {
-        int received = recv(sock, (char*)buffer + total, size - total, 0);
-        if (received <= 0) return -1;
-        total += received;
+        int r = recv(sock, (char *)buffer + total, size - total, 0);
+
+        if (r < 0) {
+            perror("recvAll");
+            return -1;
+        }
+        if (r == 0) {
+            fprintf(stderr, "recvAll: connection closed unexpectedly\n");
+            return -1;
+        }
+
+        total += r;
     }
+
     return 0;
 }

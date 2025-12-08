@@ -7,23 +7,46 @@
 #include "../../include/utils.h"
 #include "../../include/networkClient.h"
 
-// =====================================================================
-// Upload
-// =====================================================================
+// ------------------------------------------------------------
+// Helper: pretty-print server response
+// ------------------------------------------------------------
+static void printStatus(int status)
+{
+    if (status == STATUS_OK) {
+        printf("[OK]\n");
+    } else if (status == STATUS_DENIED) {
+        printf("[DENIED]\n");
+    } else {
+        printf("[ERROR]\n");
+    }
+}
+
+// ------------------------------------------------------------
+// UPLOAD
+// ------------------------------------------------------------
 int clientUpload(int sock, const char *localPath, const char *remotePath)
 {
     FILE *f = fopen(localPath, "rb");
     if (!f) {
-        printf("Could not open local file.\n");
+        printf("[UPLOAD] Cannot open local file '%s'\n", localPath);
         return -1;
     }
 
+    // Get file size
     fseek(f, 0, SEEK_END);
     int size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
+    if (size <= 0) {
+        printf("[UPLOAD] File is empty or unreadable.\n");
+        fclose(f);
+        return -1;
+    }
+
+    // Load file into memory
     char *buffer = malloc(size);
     if (!buffer) {
+        printf("[UPLOAD] Out of memory!\n");
         fclose(f);
         return -1;
     }
@@ -31,65 +54,85 @@ int clientUpload(int sock, const char *localPath, const char *remotePath)
     fread(buffer, 1, size, f);
     fclose(f);
 
+    // Prepare message
     ProtocolMessage msg;
     memset(&msg, 0, sizeof(msg));
-
     msg.command = CMD_UPLOAD;
-    strncpy(msg.arg1, remotePath, sizeof(msg.arg1));
-    snprintf(msg.arg2, sizeof(msg.arg2), "%d", size);
 
+    strncpy(msg.arg1, remotePath, ARG_SIZE);
+    snprintf(msg.arg2, ARG_SIZE, "%d", size);
+
+    // Send upload request
     sendMessage(sock, &msg);
 
-    ProtocolResponse res;
-    if (receiveResponse(sock, &res) < 0 || res.status != STATUS_OK) {
-        printf("Server refused upload.\n");
+    // Wait for server ACK
+    ProtocolResponse ack;
+    if (receiveResponse(sock, &ack) < 0 || ack.status != STATUS_OK) {
+        printf("[UPLOAD] Server refused upload.\n");
         free(buffer);
         return -1;
     }
 
-    sendAll(sock, buffer, size);
-    free(buffer);
-
-    if (receiveResponse(sock, &res) < 0 || res.status != STATUS_OK) {
-        printf("Upload failed.\n");
+    // Send file data
+    if (sendAll(sock, buffer, size) < 0) {
+        printf("[UPLOAD] Sending data failed.\n");
+        free(buffer);
         return -1;
     }
 
-    printf("Upload complete.\n");
+    free(buffer);
+
+    // Final server response
+    ProtocolResponse final;
+    if (receiveResponse(sock, &final) < 0 || final.status != STATUS_OK) {
+        printf("[UPLOAD] Upload failed.\n");
+        return -1;
+    }
+
+    printf("[UPLOAD] Complete (%d bytes).\n", final.dataSize);
     return 0;
 }
 
-// =====================================================================
-// Download
-// =====================================================================
+// ------------------------------------------------------------
+// DOWNLOAD
+// ------------------------------------------------------------
 int clientDownload(int sock, const char *remotePath, const char *localPath)
 {
     ProtocolMessage msg;
     memset(&msg, 0, sizeof(msg));
 
     msg.command = CMD_DOWNLOAD;
-    strncpy(msg.arg1, remotePath, sizeof(msg.arg1));
+    strncpy(msg.arg1, remotePath, ARG_SIZE);
 
     sendMessage(sock, &msg);
 
     ProtocolResponse res;
     if (receiveResponse(sock, &res) < 0 || res.status != STATUS_OK) {
-        printf("Server refused download.\n");
+        printf("[DOWNLOAD] Server refused download.\n");
         return -1;
     }
 
     int size = res.dataSize;
+    if (size <= 0) {
+        printf("[DOWNLOAD] No data received.\n");
+        return -1;
+    }
 
     char *buffer = malloc(size);
-    if (!buffer) return -1;
+    if (!buffer) {
+        printf("[DOWNLOAD] Out of memory.\n");
+        return -1;
+    }
 
     if (recvAll(sock, buffer, size) < 0) {
+        printf("[DOWNLOAD] Data receive failed.\n");
         free(buffer);
         return -1;
     }
 
     FILE *f = fopen(localPath, "wb");
     if (!f) {
+        printf("[DOWNLOAD] Cannot create file '%s'\n", localPath);
         free(buffer);
         return -1;
     }
@@ -98,28 +141,39 @@ int clientDownload(int sock, const char *remotePath, const char *localPath)
     fclose(f);
     free(buffer);
 
-    printf("Download complete.\n");
+    printf("[DOWNLOAD] Complete (%d bytes).\n", size);
     return 0;
 }
 
-// =====================================================================
-// Generic command sender for all simple server commands
-// =====================================================================
+// ------------------------------------------------------------
+// SIMPLE COMMANDS (LOGIN, CD, LIST, CREATE, DELETE, MOVE...)
+// ------------------------------------------------------------
 int clientSendSimple(int sock, ProtocolMessage *msg)
 {
     sendMessage(sock, msg);
 
     ProtocolResponse res;
     if (receiveResponse(sock, &res) < 0) {
-        printf("Error receiving response.\n");
+        printf("[SERVER] No response.\n");
         return -1;
     }
 
-    printf("Status: %d\n", res.status);
+    printStatus(res.status);
 
+    // If server sends additional text (LIST, READ, ERROR details)
     if (res.dataSize > 0) {
         char *buffer = malloc(res.dataSize + 1);
-        recvAll(sock, buffer, res.dataSize);
+        if (!buffer) {
+            printf("[CLIENT] Out of memory.\n");
+            return -1;
+        }
+
+        if (recvAll(sock, buffer, res.dataSize) < 0) {
+            printf("[CLIENT] Failed reading extra data.\n");
+            free(buffer);
+            return -1;
+        }
+
         buffer[res.dataSize] = '\0';
         printf("%s\n", buffer);
         free(buffer);

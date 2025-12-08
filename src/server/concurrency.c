@@ -1,109 +1,109 @@
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #include "../../include/concurrency.h"
 
-// Global lock table
 static FileLock locks[MAX_LOCKS];
 
-// Initialize all locks
+// ------------------------------------------------------------
+// Initialize local lock table
+// ------------------------------------------------------------
 void initLocks()
 {
     for (int i = 0; i < MAX_LOCKS; i++) {
-        locks[i].path[0] = '\0';    // empty entry
-        locks[i].readCount = 0;
-        locks[i].writeLock = 0;
+        locks[i].path[0] = '\0';
+        locks[i].fd = -1;
+        locks[i].locked = 0;
     }
 }
 
-// Helper: find or create lock entry for a path
-static FileLock* getLock(const char *path)
+// ------------------------------------------------------------
+// Find or create lock entry for a path
+// ------------------------------------------------------------
+static FileLock* getLockEntry(const char *path)
 {
-    // 1. Try to find existing entry
+    // Find existing
     for (int i = 0; i < MAX_LOCKS; i++) {
-        if (strcmp(locks[i].path, path) == 0) {
+        if (strcmp(locks[i].path, path) == 0)
             return &locks[i];
-        }
     }
 
-    // 2. Create new entry if empty slot exists
+    // Create new
     for (int i = 0; i < MAX_LOCKS; i++) {
         if (locks[i].path[0] == '\0') {
             strncpy(locks[i].path, path, PATH_SIZE);
-            locks[i].readCount = 0;
-            locks[i].writeLock = 0;
+            locks[i].fd = -1;
+            locks[i].locked = 0;
             return &locks[i];
         }
     }
-
-    return NULL; // no free slot
+    return NULL;
 }
 
-// Cleanup lock entry if not used anymore
-// It won't help us to have more than 64 active locks, but will enable new locks after 64 files
-static void cleanupLock(FileLock *l)
+// ------------------------------------------------------------
+// Acquire EXCLUSIVE lock using fcntl
+// ------------------------------------------------------------
+int acquireFileLock(const char *path)
 {
-    // Now every new proces will be able to use lock!
-    if (l->readCount == 0 && l->writeLock == 0) {   
-        l->path[0] = '\0';
-    }
-}
-
-// Acquire read lock
-int acquireReadLock(const char *path)
-{
-    FileLock *l = getLock(path);
-    if (!l) {
-        return -1;
-    }
-
-    // Cannot read if write is active
-    if (l->writeLock == 1) {    // We need to check just for write lock in this case
-        return -1;
-    }
-
-    // Safe: increase readers
-    l->readCount++;
-    return 0;
-}
-
-// Release read lock
-void releaseReadLock(const char *path)
-{
-    FileLock *l = getLock(path);
-    if (!l) return;
-
-    if (l->readCount > 0) {     // ReadCount can't be negatve
-        l->readCount--;
-    }
-
-    cleanupLock(l);   // free slot
-}
-
-// Acquire write lock
-int acquireWriteLock(const char *path)
-{
-    FileLock *l = getLock(path);
+    FileLock *l = getLockEntry(path);
     if (!l) return -1;
 
-    // Only allow write if:
-    // - NO readers
-    // - NO writer
-    if (l->readCount == 0 && l->writeLock == 0) {   // We check both not just read lock count
-        l->writeLock = 1;
+    // Already locked in THIS process
+    if (l->locked == 1) {
         return 0;
     }
 
-    return -1;
+    // Create a sidecar .lock file
+    char lockPath[PATH_SIZE + 10];
+    snprintf(lockPath, sizeof(lockPath), "%s.lock", path);
+
+    int fd = open(lockPath, O_CREAT | O_RDWR, 0600);
+    if (fd < 0) {
+        perror("open lock file");
+        return -1;
+    }
+
+    // Prepare exclusive lock
+    struct flock fl;
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type = F_WRLCK;   // exclusive lock
+    fl.l_whence = SEEK_SET;
+    fl.l_start = 0;
+    fl.l_len = 0;
+
+    // NON-BLOCKING attempt
+    if (fcntl(fd, F_SETLK, &fl) < 0) {
+        close(fd);
+        return -1;  // lock is already held by another process
+    }
+
+    // Success
+    l->fd = fd;
+    l->locked = 1;
+
+    return 0;
 }
 
-// Release write lock
-void releaseWriteLock(const char *path)
+// ------------------------------------------------------------
+// Release file lock
+// ------------------------------------------------------------
+void releaseFileLock(const char *path)
 {
-    FileLock *l = getLock(path);
-    if (!l) return;
+    FileLock *l = getLockEntry(path);
+    if (!l || l->locked == 0) return;
 
-    l->writeLock = 0;
+    struct flock fl;
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type = F_UNLCK;
+    fl.l_whence = SEEK_SET;
 
-    cleanupLock(l);  // free slot
+    fcntl(l->fd, F_SETLK, &fl);
+    close(l->fd);
+
+    l->fd = -1;
+    l->locked = 0;
+    l->path[0] = '\0';
 }

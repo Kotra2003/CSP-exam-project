@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <stdlib.h>
+#include <sys/socket.h>
 
 #include "../../include/serverCommands.h"
 #include "../../include/protocol.h"
@@ -10,1157 +12,641 @@
 #include "../../include/utils.h"
 #include "../../include/fsOps.h"
 #include "../../include/concurrency.h"
+#include "../../include/network.h"
 
 
-// Decide which command has been received
+extern const char *gRootDir;
+
+// ================================================================
+// Helper: send simple response
+// ================================================================
+static void sendStatus(int clientFd, int status, int dataSize)
+{
+    ProtocolResponse res;
+    res.status = status;
+    res.dataSize = dataSize;
+    sendResponse(clientFd, &res);
+}
+
+static void sendOk(int clientFd, int dataSize)
+{
+    sendStatus(clientFd, STATUS_OK, dataSize);
+}
+
+static void sendErrorMsg(int clientFd)
+{
+    sendStatus(clientFd, STATUS_ERROR, 0);
+}
+
+static int ensureLoggedIn(int clientFd, Session *session, const char *cmdName)
+{
+    if (!session->isLoggedIn) {
+        printf("[%s] ERROR: user not logged in\n", cmdName);
+        fflush(stdout);
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+    return 1;
+}
+
+static void debugCommand(const char *name, ProtocolMessage *msg, Session *s)
+{
+    printf("[%s] cmd=%d, arg1='%s', arg2='%s', arg3='%s', loggedIn=%d\n",
+        name,
+        msg->command,
+        msg->arg1,
+        msg->arg2,
+        msg->arg3,
+        s ? s->isLoggedIn : -1);
+    fflush(stdout);
+}
+
+// ================================================================
+// DISPATCHER
+// ================================================================
 int processCommand(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    switch (msg->command) {
-
-        case CMD_LOGIN:
-            return handleLogin(clientFd, msg, session);
-
-        case CMD_CREATE_USER:
-            return handleCreateUser(clientFd, msg, session);
-
-        case CMD_CREATE:
-            return handleCreate(clientFd, msg, session);
-
-        case CMD_CHMOD:
-            return handleChmod(clientFd, msg, session);
-
-        case CMD_MOVE:
-            return handleMove(clientFd, msg, session);
-
-        case CMD_CD:
-            return handleCd(clientFd, msg, session);
-
-        case CMD_LIST:
-            return handleList(clientFd, msg, session);
-
-        case CMD_READ:
-            return handleRead(clientFd, msg, session);
-
-        case CMD_WRITE:
-            return handleWrite(clientFd, msg, session);
-
-        case CMD_DELETE:
-            return handleDelete(clientFd, msg, session);
-
-        case CMD_EXIT:
-            // return 1 so serverMain knows to close the connection
-            return 1;
+    switch (msg->command)
+    {
+        case CMD_LOGIN:       return handleLogin(clientFd, msg, session);
+        case CMD_CREATE_USER: return handleCreateUser(clientFd, msg, session);
+        case CMD_CREATE:      return handleCreate(clientFd, msg, session);
+        case CMD_CHMOD:       return handleChmod(clientFd, msg, session);
+        case CMD_MOVE:        return handleMove(clientFd, msg, session);
+        case CMD_CD:          return handleCd(clientFd, msg, session);
+        case CMD_LIST:        return handleList(clientFd, msg, session);
+        case CMD_READ:        return handleRead(clientFd, msg, session);
+        case CMD_WRITE:       return handleWrite(clientFd, msg, session);
+        case CMD_DELETE:      return handleDelete(clientFd, msg, session);
+        case CMD_UPLOAD:      return handleUpload(clientFd, msg, session);
+        case CMD_DOWNLOAD:    return handleDownload(clientFd, msg, session);
+        case CMD_EXIT:        return 1;
 
         default:
-            printf("Unknown command received.\n");
+            printf("[UNKNOWN] cmd=%d\n", msg->command);
+            sendErrorMsg(clientFd);
             return 0;
     }
 }
 
-extern const char *gRootDir;
-
-//---------------------------------LONGIN---------------------------------
+// ================================================================
+// LOGIN
+// ================================================================
 int handleLogin(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
-    char username[USERNAME_SIZE];
-    char homePath[PATH_SIZE];
+    debugCommand("LOGIN", msg, session);
 
-    // If already logged in, do not allow another login
     if (session->isLoggedIn) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        printf("[LOGIN] ERROR: already logged in.\n");
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Check if username argument is not empty
     if (msg->arg1[0] == '\0') {
-        // No username provided
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        printf("[LOGIN] ERROR: missing username.\n");
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Copy username from message
-    strncpy(username, msg->arg1, USERNAME_SIZE);
-    username[USERNAME_SIZE - 1] = '\0';  // ensure null-terminated
+    char homePath[PATH_SIZE];
+    snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, msg->arg1);
 
-    // Build home directory path: <rootDir>/<username>
-    snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, username);
-
-    // Check if user home directory exists
     if (!fileExists(homePath)) {
-        // User does not exist (must be created with create_user)
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        printf("[LOGIN] ERROR: no such user dir '%s'\n", homePath);
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Initialize session for this user
-    // This will set username, homeDir and currentDir
-    loginUser(session, gRootDir, username);
+    loginUser(session, gRootDir, msg->arg1);
 
-    // Send OK response to client
-    res.status = STATUS_OK;
-    res.dataSize = 0;
-    sendResponse(clientFd, &res);
-
+    printf("[LOGIN] OK user='%s'\n", session->username);
+    sendOk(clientFd, 0);
     return 0;
 }
 
-//------------------------------------------------------------------------
-
-//-------------------------------CREATE USER-------------------------------
-
+// ================================================================
+// CREATE USER
+// ================================================================
 int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
+    debugCommand("CREATE_USER", msg, session);
 
-    // Username is in arg1
     if (msg->arg1[0] == '\0') {
-        // Username missing
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    char username[USERNAME_SIZE];
     char path[PATH_SIZE];
+    snprintf(path, PATH_SIZE, "%s/%s", gRootDir, msg->arg1);
 
-    // Copy username
-    strncpy(username, msg->arg1, USERNAME_SIZE);
-    username[USERNAME_SIZE - 1] = '\0';
-
-    // Build path like this one <rootDir>/<username>
-    snprintf(path, PATH_SIZE, "%s/%s", gRootDir, username);
-
-    // Check if user already exists
     if (fileExists(path)) {
-        // User already exists → cannot create
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        printf("[CREATE_USER] ERROR exists '%s'\n", path);
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Try to create directory for user
     if (mkdir(path, 0700) < 0) {
-        // Some OS error occurred
         perror("mkdir");
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Success – user created
-    res.status = STATUS_OK;
-    res.dataSize = 0;
-    sendResponse(clientFd, &res);
-
+    sendOk(clientFd, 0);
     return 0;
 }
 
-//------------------------------------------------------------------------
-
-//---------------------------------CREATE---------------------------------
-
+// ================================================================
+// CREATE FILE / DIR
+// ================================================================
 int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
-    char fullPath[PATH_SIZE];
+    debugCommand("CREATE", msg, session);
 
-    // Must be logged in
-    if (!session->isLoggedIn) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    if (!ensureLoggedIn(clientFd, session, "CREATE"))
         return 0;
-    }
 
-    // Extract arguments
     const char *pathArg = msg->arg1;
     const char *permArg = msg->arg2;
     const char *typeArg = msg->arg3;
 
-    // Check if path provided
-    if (pathArg[0] == '\0' || permArg[0] == '\0' || typeArg[0] == '\0') {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    if (!pathArg[0] || !permArg[0] || !typeArg[0]) {
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Check if permissions are numeric (Because it can only be 755 or 57.. but not a string)
-    if (!isNumeric(permArg)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
+    int permissions = (int)strtol(permArg, NULL, 8);
+    int isDir = (strcmp(typeArg, "dir") == 0);
 
-    // Convert permissions string to int base 8 (octal) (This can be done only after we are sure string is numeric only)
-    int permissions = strtol(permArg, NULL, 8);
-
-    // Determine if directory or file (if none then error)
-    int isDirectory = 0;
-    if (strcmp(typeArg, "dir") == 0) {
-        isDirectory = 1;
-    } else if (strcmp(typeArg, "file") != 0) {
-        // Invalid type
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Build full path from session
+    char fullPath[PATH_SIZE];
     if (resolvePath(session, pathArg, fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Check sandbox (must stay inside user's home directory)
     if (!isInsideRoot(session->homeDir, fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Check if file already exists
     if (fileExists(fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Create file or directory
-    if (fsCreate(fullPath, permissions, isDirectory) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    if (fsCreate(fullPath, permissions, isDir) < 0) {
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Success
-    res.status = STATUS_OK;
-    res.dataSize = 0;
-    sendResponse(clientFd, &res);
-
+    sendOk(clientFd, 0);
     return 0;
 }
 
-//------------------------------------------------------------------------
-
-//--------------------------------CHMOD-----------------------------------
-
+// ================================================================
+// CHMOD
+// ================================================================
 int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
+    debugCommand("CHMOD", msg, session);
+
+    if (!ensureLoggedIn(clientFd, session, "CHMOD"))
+        return 0;
+
     char fullPath[PATH_SIZE];
 
-    // Must be logged in
-    if (!session->isLoggedIn) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    if (msg->arg1[0] == '\0' || msg->arg2[0] == '\0') {
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    const char *pathArg = msg->arg1;
-    const char *permArg = msg->arg2;
+    int permissions = (int)strtol(msg->arg2, NULL, 8);
 
-    // Check missing arguments
-    if (pathArg[0] == '\0' || permArg[0] == '\0') {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
+        !isInsideRoot(session->homeDir, fullPath) ||
+        !fileExists(fullPath)) {
+
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Permissions must be numeric
-    if (!isNumeric(permArg)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Convert permissions from string to octal
-    int permissions = strtol(permArg, NULL, 8);
-
-    // Resolve path
-    if (resolvePath(session, pathArg, fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Sandbox check — user CANNOT chmod outside his home
-    if (!isInsideRoot(session->homeDir, fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Check if file exists
-    if (!fileExists(fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Apply chmod
     if (fsChmod(fullPath, permissions) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Success
-    res.status = STATUS_OK;
-    res.dataSize = 0;
-    sendResponse(clientFd, &res);
-
+    sendOk(clientFd, 0);
     return 0;
 }
 
-//------------------------------------------------------------------------
-
-//---------------------------------MOVE-----------------------------------
-
+// ================================================================
+// MOVE
+// ================================================================
 int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
-    char srcFull[PATH_SIZE];
-    char dstFull[PATH_SIZE];
+    debugCommand("MOVE", msg, session);
 
-    // Must be logged in
-    if (!session->isLoggedIn) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    if (!ensureLoggedIn(clientFd, session, "MOVE"))
+        return 0;
+
+    char src[PATH_SIZE], dst[PATH_SIZE];
+
+    if (!msg->arg1[0] || !msg->arg2[0]) {
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    const char *srcArg = msg->arg1;
-    const char *dstArg = msg->arg2;
+    if (resolvePath(session, msg->arg1, src) < 0 ||
+        resolvePath(session, msg->arg2, dst) < 0) {
 
-    // Check arguments
-    if (srcArg[0] == '\0' || dstArg[0] == '\0') {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Resolve source path
-    if (resolvePath(session, srcArg, srcFull) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    if (!isInsideRoot(session->homeDir, src) ||
+        !isInsideRoot(session->homeDir, dst) ||
+        !fileExists(src) ||
+        fileExists(dst)) {
+
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Resolve destination path
-    if (resolvePath(session, dstArg, dstFull) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    // STRIKTNI LOCK za oba fajla
+    if (acquireFileLock(src) < 0 || acquireFileLock(dst) < 0) {
+        releaseFileLock(src);
+        releaseFileLock(dst);
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Both paths MUST be inside user's home directory
-    if (!isInsideRoot(session->homeDir, srcFull) ||
-        !isInsideRoot(session->homeDir, dstFull)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    int ok = fsMove(src, dst);
+
+    releaseFileLock(src);
+    releaseFileLock(dst);
+
+    if (ok < 0) {
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Check if source exists
-    if (!fileExists(srcFull)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Destination MUST NOT already exist
-    if (fileExists(dstFull)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Acquire write locks on both source and destination
-    if (acquireWriteLock(srcFull) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    if (acquireWriteLock(dstFull) < 0) {
-        releaseWriteLock(srcFull);
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Perform move (rename)
-    if (fsMove(srcFull, dstFull) < 0) {
-        releaseWriteLock(srcFull);
-        releaseWriteLock(dstFull);
-
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Release locks after success
-    releaseWriteLock(srcFull);
-    releaseWriteLock(dstFull);
-
-    // Success
-    res.status = STATUS_OK;
-    res.dataSize = 0;
-    sendResponse(clientFd, &res);
-
+    sendOk(clientFd, 0);
     return 0;
 }
 
-//-------------------------------------------------------------------------
-
-//-----------------------------------CD------------------------------------
-
+// ================================================================
+// CD
+// ================================================================
 int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
+    debugCommand("CD", msg, session);
+
+    if (!ensureLoggedIn(clientFd, session, "CD"))
+        return 0;
+
     char fullPath[PATH_SIZE];
 
-    // User must be logged in to use cd
-    if (!session->isLoggedIn) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // We always need argument or path for cd (if we don't have it we will just be returned to home)
     if (msg->arg1[0] == '\0') {
         strncpy(session->currentDir, session->homeDir, PATH_SIZE);
-        res.status = STATUS_OK;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+        sendOk(clientFd, 0);
         return 0;
     }
 
-    // Build full path according to session rules
-    if (resolvePath(session, msg->arg1, fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
+        !isInsideRoot(session->homeDir, fullPath)) {
+
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Check sandbox restriction (must stay inside home directory)
-    if (!isInsideRoot(session->homeDir, fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Check if the directory exists
     struct stat st;
-    if (stat(fullPath, &st) < 0) {  // If we don't get any info about directory than directory dosen't exist
-        // Directory does not exist
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    if (stat(fullPath, &st) < 0 || !S_ISDIR(st.st_mode)) {
+        sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Check if it is a directory (not a file)
-    if (!S_ISDIR(st.st_mode)) {     // Checking mode of file to know if it's a directory
-        // Not a directory
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Success — change current directory
     strncpy(session->currentDir, fullPath, PATH_SIZE);
-
-    res.status = STATUS_OK;
-    res.dataSize = 0;
-    sendResponse(clientFd, &res);
-
+    sendOk(clientFd, 0);
     return 0;
 }
 
-//------------------------------------------------------------------------
-
-//------------------------------LIST--------------------------------------
-
+// ================================================================
+// LIST
+// ================================================================
 int handleList(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
-    char fullPath[PATH_SIZE];
-    char output[4096];   // enough for listing
-    output[0] = '\0';
+    debugCommand("LIST", msg, session);
 
-    // User must be logged in
-    if (!session->isLoggedIn) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
+    if (!ensureLoggedIn(clientFd, session, "LIST"))
         return 0;
-    }
 
-    // If no argument → list currentDir
+    char fullPath[PATH_SIZE];
+    char buffer[4096];
+    buffer[0] = '\0';
+
     if (msg->arg1[0] == '\0') {
         strncpy(fullPath, session->currentDir, PATH_SIZE);
     } else {
-        // Build full path
-        if (resolvePath(session, msg->arg1, fullPath) < 0) {
-            res.status = STATUS_ERROR;
-            res.dataSize = 0;
-            sendResponse(clientFd, &res);
-            return 0;
-        }
+        if (resolvePath(session, msg->arg1, fullPath) < 0)
+            return sendErrorMsg(clientFd), 0;
     }
 
-    // Check root-level sandbox (list can go anywhere under root)
-    if (!isInsideRoot(gRootDir, fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+    if (!isInsideRoot(session->homeDir, fullPath)) {
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Check directory exists
-    struct stat st;
-    if (stat(fullPath, &st) < 0 || !S_ISDIR(st.st_mode)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Open directory
     DIR *dir = opendir(fullPath);
     if (!dir) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Read all entries
-    struct dirent *entry;       // Like struct that can point to the file and be used for listing
+    struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        // Skip . and ..
-        if (strcmp(entry->d_name, ".") == 0 ||
-            strcmp(entry->d_name, "..") == 0)
-            continue;
+        if (strcmp(entry->d_name, ".") &&
+            strcmp(entry->d_name, "..")) {
 
-        strcat(output, entry->d_name);
-        strcat(output, "\n");
+            strcat(buffer, entry->d_name);
+            strcat(buffer, "\n");
+        }
     }
-
     closedir(dir);
 
-    // Send OK + data
-    res.status = STATUS_OK;
-    res.dataSize = strlen(output);
-
-    sendResponse(clientFd, &res);
-
-    // Now send the actual listing text
-    if (res.dataSize > 0)
-        send(clientFd, output, res.dataSize, 0);
-
+    sendOk(clientFd, strlen(buffer));
+    send(clientFd, buffer, strlen(buffer), 0);
     return 0;
 }
 
-//------------------------------------------------------------------------
-
-//------------------------------READ--------------------------------------
-
+// ================================================================
+// READ
+// ================================================================
 int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
+    debugCommand("READ", msg, session);
+
+    if (!ensureLoggedIn(clientFd, session, "READ"))
+        return 0;
+
+    if (!msg->arg1[0] || !msg->arg2[0] || !msg->arg3[0])
+        return sendErrorMsg(clientFd), 0;
+
     char fullPath[PATH_SIZE];
+    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
+        !isInsideRoot(session->homeDir, fullPath) ||
+        !fileExists(fullPath)) {
 
-    // Must be logged in
-    if (!session->isLoggedIn) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+        return sendErrorMsg(clientFd), 0;
     }
 
-    const char *pathArg   = msg->arg1;
-    const char *offsetArg = msg->arg2;
-    const char *sizeArg   = msg->arg3;
+    int offset = atoi(msg->arg2);
+    int size = atoi(msg->arg3);
+    if (size <= 0)
+        return sendErrorMsg(clientFd), 0;
 
-    // Check arguments
-    if (pathArg[0] == '\0' ||
-        offsetArg[0] == '\0' ||
-        sizeArg[0] == '\0') {
-
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+    // STRIKT LOCK
+    if (acquireFileLock(fullPath) < 0) {
+        printf("[READ] file locked '%s'\n", fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Check numeric arguments
-    if (!isNumeric(offsetArg) || !isNumeric(sizeArg)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    int offset = atoi(offsetArg);
-    int size   = atoi(sizeArg);
-
-    if (size <= 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Resolve path
-    if (resolvePath(session, pathArg, fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Must be inside user's home
-    if (!isInsideRoot(session->homeDir, fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Check existence
-    if (!fileExists(fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Acquire read lock
-    if (acquireReadLock(fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Allocate buffer for reading
     char *buffer = malloc(size);
     if (!buffer) {
-        releaseReadLock(fullPath);
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+        releaseFileLock(fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    int bytesRead = fsReadFile(fullPath, buffer, size, offset);
-
-    if (bytesRead < 0) {
+    int readBytes = fsReadFile(fullPath, buffer, size, offset);
+    if (readBytes < 0) {
         free(buffer);
-        releaseReadLock(fullPath);
-
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+        releaseFileLock(fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Release read lock (reading is done)
-    releaseReadLock(fullPath);
+    releaseFileLock(fullPath);
 
-    res.status = STATUS_OK;
-    res.dataSize = bytesRead;
-
-    sendResponse(clientFd, &res);
-
-    // Send file data
-    if (bytesRead > 0) {
-        send(clientFd, buffer, bytesRead, 0);
-    }
+    sendOk(clientFd, readBytes);
+    send(clientFd, buffer, readBytes, 0);
 
     free(buffer);
     return 0;
 }
 
-//------------------------------------------------------------------------
-
-//-------------------------------WRITE------------------------------------
-
+// ================================================================
+// WRITE
+// ================================================================
 int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
+    debugCommand("WRITE", msg, session);
+
+    if (!ensureLoggedIn(clientFd, session, "WRITE"))
+        return 0;
+
     char fullPath[PATH_SIZE];
 
-    // User must be logged in
-    if (!session->isLoggedIn) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+    if (!msg->arg1[0] || !msg->arg2[0] || !msg->arg3[0])
+        return sendErrorMsg(clientFd), 0;
+
+    int offset = atoi(msg->arg2);
+    int size = atoi(msg->arg3);
+
+    if (size <= 0)
+        return sendErrorMsg(clientFd), 0;
+
+    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
+        !isInsideRoot(session->homeDir, fullPath)) {
+
+        return sendErrorMsg(clientFd), 0;
     }
 
-    const char *pathArg   = msg->arg1;
-    const char *offsetArg = msg->arg2;
-    const char *sizeArg   = msg->arg3;
-
-    // Arguments must be present
-    if (pathArg[0] == '\0' ||
-        offsetArg[0] == '\0' ||
-        sizeArg[0] == '\0') {
-
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+    // STRICT EXCLUSIVE LOCK
+    if (acquireFileLock(fullPath) < 0) {
+        printf("[WRITE] file in use '%s'\n", fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Offset and size must be numeric
-    if (!isNumeric(offsetArg) || !isNumeric(sizeArg)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
+    // ACK before receiving data
+    sendOk(clientFd, 0);
 
-    int offset = atoi(offsetArg);
-    int size   = atoi(sizeArg);
-
-    if (size <= 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Resolve path
-    if (resolvePath(session, pathArg, fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Sandbox: must stay inside user's home directory
-    if (!isInsideRoot(session->homeDir, fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Acquire WRITE lock
-    if (acquireWriteLock(fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Allocate buffer for incoming data
     char *buffer = malloc(size);
     if (!buffer) {
-        releaseWriteLock(fullPath);
-
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+        releaseFileLock(fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Receive raw data from client
-    int received = recvAll(clientFd, buffer, size);
-    if (received < 0) {
+    if (recvAll(clientFd, buffer, size) < 0) {
         free(buffer);
-        releaseWriteLock(fullPath);
-
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+        releaseFileLock(fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Perform write
     int written = fsWriteFile(fullPath, buffer, size, offset);
 
     free(buffer);
-    releaseWriteLock(fullPath);
+    releaseFileLock(fullPath);
 
-    if (written < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
+    if (written < 0)
+        return sendErrorMsg(clientFd), 0;
 
-    // Success
-    res.status = STATUS_OK;
-    res.dataSize = written;
-    sendResponse(clientFd, &res);
-
+    sendOk(clientFd, written);
     return 0;
 }
 
-//------------------------------------------------------------------------
-
-//------------------------------DELETE------------------------------------
-
+// ================================================================
+// DELETE
+// ================================================================
 int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
+    debugCommand("DELETE", msg, session);
+
+    if (!ensureLoggedIn(clientFd, session, "DELETE"))
+        return 0;
+
     char fullPath[PATH_SIZE];
 
-    // Must be logged in
-    if (!session->isLoggedIn) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+    if (!msg->arg1[0] ||
+        resolvePath(session, msg->arg1, fullPath) < 0 ||
+        !isInsideRoot(session->homeDir, fullPath)) {
+
+        return sendErrorMsg(clientFd), 0;
     }
 
-    const char *pathArg = msg->arg1;
-
-    // Check path provided
-    if (pathArg[0] == '\0') {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Resolve path
-    if (resolvePath(session, pathArg, fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Delete only inside user's home folder
-    if (!isInsideRoot(session->homeDir, fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Check existence
     struct stat st;
-    if (stat(fullPath, &st) < 0) {
-        // File does not exist
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
+    if (stat(fullPath, &st) < 0)
+        return sendErrorMsg(clientFd), 0;
 
-    // If it is a directory, check if empty
+    // If it's directory → ensure empty
     if (S_ISDIR(st.st_mode)) {
         DIR *dir = opendir(fullPath);
-        if (!dir) {
-            res.status = STATUS_ERROR;
-            res.dataSize = 0;
-            sendResponse(clientFd, &res);
-            return 0;
-        }
+        if (!dir) return sendErrorMsg(clientFd), 0;
 
-        struct dirent *entry;
-        int notEmpty = 0;
-
-        while ((entry = readdir(dir)) != NULL) {
-            // We will jump over . and .. because they exist in every file
-            if (strcmp(entry->d_name, ".") != 0 &&
-                strcmp(entry->d_name, "..") != 0) {
-                notEmpty = 1;
-                break;
+        struct dirent *e;
+        while ((e = readdir(dir)) != NULL) {
+            if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
+                closedir(dir);
+                return sendErrorMsg(clientFd), 0;
             }
         }
-
         closedir(dir);
-
-        if (notEmpty) {
-            // Directory not empty
-            res.status = STATUS_ERROR;
-            res.dataSize = 0;
-            sendResponse(clientFd, &res);
-            return 0;
-        }
     }
 
-    // Acquire write lock
-    if (acquireWriteLock(fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+    // STRICT LOCK
+    if (acquireFileLock(fullPath) < 0) {
+        printf("[DELETE] file in use '%s'\n", fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Delete file or directory
-    if (fsDelete(fullPath) < 0) {
-        // Release lock before returning
-        releaseWriteLock(fullPath);
+    int ok = fsDelete(fullPath);
 
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
+    releaseFileLock(fullPath);
 
-    // Release lock after we have deleted file
-    releaseWriteLock(fullPath);
+    if (ok < 0)
+        return sendErrorMsg(clientFd), 0;
 
-    // Success
-    res.status = STATUS_OK;
-    res.dataSize = 0;
-    sendResponse(clientFd, &res);
-
+    sendOk(clientFd, 0);
     return 0;
 }
 
-//------------------------------------------------------------------------
-
-//------------------------------UPLOAD------------------------------------
-
+// ================================================================
+// UPLOAD
+// ================================================================
 int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
+    debugCommand("UPLOAD", msg, session);
+
+    if (!ensureLoggedIn(clientFd, session, "UPLOAD"))
+        return 0;
+
     char fullPath[PATH_SIZE];
+    int size = atoi(msg->arg2);
 
-    // Must be logged in
-    if (!session->isLoggedIn) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+    if (!msg->arg1[0] || size <= 0)
+        return sendErrorMsg(clientFd), 0;
+
+    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
+        !isInsideRoot(session->homeDir, fullPath)) {
+
+        return sendErrorMsg(clientFd), 0;
     }
 
-    const char *pathArg = msg->arg1;
-    const char *sizeArg = msg->arg2;
-
-    // Check args
-    if (pathArg[0] == '\0' || sizeArg[0] == '\0') {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+    // LOCK
+    if (acquireFileLock(fullPath) < 0) {
+        printf("[UPLOAD] file in use '%s'\n", fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Size must be numeric
-    if (!isNumeric(sizeArg)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
+    sendOk(clientFd, 0); // tell client to send data
 
-    int size = atoi(sizeArg);
-    if (size <= 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Resolve target path
-    if (resolvePath(session, pathArg, fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Must be inside user's home directory
-    if (!isInsideRoot(session->homeDir, fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Acquire WRITE lock
-    if (acquireWriteLock(fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Tell client to send data
-    res.status = STATUS_OK;
-    res.dataSize = 0;
-    sendResponse(clientFd, &res);
-
-    // Allocate buffer for file data
     char *buffer = malloc(size);
     if (!buffer) {
-        releaseWriteLock(fullPath);
-        return 0;
+        releaseFileLock(fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Receive raw data
-    int received = recvAll(clientFd, buffer, size);
-    if (received < 0) {
+    if (recvAll(clientFd, buffer, size) < 0) {
         free(buffer);
-        releaseWriteLock(fullPath);
-        return 0;
+        releaseFileLock(fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Write file (overwrite existing file if it exists)
     int written = fsWriteFile(fullPath, buffer, size, 0);
 
     free(buffer);
-    releaseWriteLock(fullPath);
+    releaseFileLock(fullPath);
 
-    if (written < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
+    if (written < 0)
+        return sendErrorMsg(clientFd), 0;
 
-    // Success
-    res.status = STATUS_OK;
-    res.dataSize = written;
-    sendResponse(clientFd, &res);
-
+    sendOk(clientFd, written);
     return 0;
 }
 
-//------------------------------------------------------------------------
-
-//-----------------------------DOWNLOAD-----------------------------------
-
+// ================================================================
+// DOWNLOAD
+// ================================================================
 int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    ProtocolResponse res;
+    debugCommand("DOWNLOAD", msg, session);
+
+    if (!ensureLoggedIn(clientFd, session, "DOWNLOAD"))
+        return 0;
+
     char fullPath[PATH_SIZE];
 
-    // Must be logged in
-    if (!session->isLoggedIn) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+    if (!msg->arg1[0] ||
+        resolvePath(session, msg->arg1, fullPath) < 0 ||
+        !isInsideRoot(session->homeDir, fullPath)) {
+
+        return sendErrorMsg(clientFd), 0;
     }
 
-    const char *pathArg = msg->arg1;
-
-    if (pathArg[0] == '\0') {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Build absolute path
-    if (resolvePath(session, pathArg, fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // User can download only his own files
-    if (!isInsideRoot(session->homeDir, fullPath)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Check existence and get file size
-    // Also we are checking if it's a regular file not directory
     struct stat st;
-    if (stat(fullPath, &st) < 0 || !S_ISREG(st.st_mode)) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+    if (stat(fullPath, &st) < 0 || !S_ISREG(st.st_mode))
+        return sendErrorMsg(clientFd), 0;
+
+    int size = st.st_size;
+
+    // LOCK
+    if (acquireFileLock(fullPath) < 0) {
+        printf("[DOWNLOAD] file in use '%s'\n", fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    int fileSize = st.st_size;
-
-    // Acquire read lock
-    if (acquireReadLock(fullPath) < 0) {
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
-    }
-
-    // Allocate buffer
-    char *buffer = malloc(fileSize);
+    char *buffer = malloc(size);
     if (!buffer) {
-        releaseReadLock(fullPath);
-        return 0;
+        releaseFileLock(fullPath);
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Read file
-    int bytesRead = fsReadFile(fullPath, buffer, fileSize, 0);
-    if (bytesRead < 0) {
+    int readBytes = fsReadFile(fullPath, buffer, size, 0);
+
+    releaseFileLock(fullPath);
+
+    if (readBytes < 0) {
         free(buffer);
-        releaseReadLock(fullPath);
-
-        res.status = STATUS_ERROR;
-        res.dataSize = 0;
-        sendResponse(clientFd, &res);
-        return 0;
+        return sendErrorMsg(clientFd), 0;
     }
 
-    // Release lock after read
-    releaseReadLock(fullPath);
-
-    // Send response header
-    res.status = STATUS_OK;
-    res.dataSize = bytesRead;
-
-    sendResponse(clientFd, &res);
-
-    // Send raw data
-    send(clientFd, buffer, bytesRead, 0);
+    sendOk(clientFd, readBytes);
+    send(clientFd, buffer, readBytes, 0);
 
     free(buffer);
     return 0;
 }
-
-//------------------------------------------------------------------------

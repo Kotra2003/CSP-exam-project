@@ -6,91 +6,156 @@
 #include <fcntl.h>
 
 #include "../../include/fsOps.h"
+#include "../../include/utils.h"
 
-// Build a full resolved path based on session and client input
+// =====================================================================
+// resolvePath
+//
+// Cilj: od korisničke putanje (relative ili "apsolutne" /foo)
+// dobiti *stvarnu* putanju unutar korisničkog sandboxa:
+//
+//   - sandbox root = session->homeDir      (npr. "rootDir/Aleksa")
+//   - session->currentDir je uvijek unutar homeDir
+//   - ".." nikad ne može izaći iz homeDir
+//   - "/something" tretiramo kao "from homeDir"
+// =====================================================================
 int resolvePath(Session *s, const char *inputPath, char *outputPath)
 {
-    char temp[PATH_SIZE];
+    if (!s || !inputPath || !outputPath) {
+        return -1;
+    }
 
-    // Absolute path → use as-is
-    if (inputPath[0] == '/') {
-        snprintf(temp, PATH_SIZE, "%s", inputPath);
+    // 1) Izračunaj trenutni relativni path u odnosu na homeDir
+    //    homeDir:      rootDir/Aleksa
+    //    currentDir:   rootDir/Aleksa/docs/sub
+    //    => curRel:    "docs/sub"
+    char curRel[PATH_SIZE] = "";
+    size_t homeLen = strlen(s->homeDir);
+
+    if (strncmp(s->currentDir, s->homeDir, homeLen) == 0) {
+        if (s->currentDir[homeLen] == '\0') {
+            // currentDir == homeDir -> curRel = ""
+            curRel[0] = '\0';
+        } else if (s->currentDir[homeLen] == '/') {
+            // nešto kao "homeDir/..."
+            strncpy(curRel, s->currentDir + homeLen + 1, PATH_SIZE);
+            curRel[PATH_SIZE - 1] = '\0';
+        } else {
+            // teorijski ne bi smjelo da se desi, ali fallback:
+            strncpy(curRel, s->currentDir, PATH_SIZE);
+            curRel[PATH_SIZE - 1] = '\0';
+        }
+    } else {
+        // još jedan fallback: ako currentDir ne krene sa homeDir,
+        // uzmi ga kao "relativan" (ovako bar ne eksplodiramo).
+        strncpy(curRel, s->currentDir, PATH_SIZE);
+        curRel[PATH_SIZE - 1] = '\0';
+    }
+
+    // 2) Napravi "virtualni path" (relativan u odnosu na homeDir)
+    //    koji ćemo normalizovati: , uklanjanje . i ..
+    char vpath[PATH_SIZE];
+
+    if (inputPath[0] == '\0' || strcmp(inputPath, ".") == 0) {
+        // prazno -> ostajemo gdje smo (curRel)
+        strncpy(vpath, curRel, PATH_SIZE);
+        vpath[PATH_SIZE - 1] = '\0';
+    }
+    else if (inputPath[0] == '/') {
+        // "/foo/bar" znači "od homeDir-a", tj. ignoriramo curRel
+        // i koristimo sve POSLIJE početnog '/'
+        snprintf(vpath, PATH_SIZE, "%s", inputPath + 1);
     }
     else {
-        // Relative path → prefix with currentDir
-        snprintf(temp, PATH_SIZE, "%s/%s", s->currentDir, inputPath);
+        // relativan path prema currentDir-u unutar homeDir-a
+        if (curRel[0] == '\0') {
+            // trenutno smo u homeDir → samo inputPath
+            snprintf(vpath, PATH_SIZE, "%s", inputPath);
+        } else {
+            // curRel/inputPath
+            snprintf(vpath, PATH_SIZE, "%s/%s", curRel, inputPath);
+        }
     }
 
-    // Normalize: remove "." and ".." safely
-    char normalized[PATH_SIZE] = "";
+    // 3) Normalizacija: ukloni "." i obradi ".." bez izlaska iz korijena.
+    //    Rezultat: relNorm (relativno u odnosu na homeDir)
+    char work[PATH_SIZE];
+    strncpy(work, vpath, PATH_SIZE);
+    work[PATH_SIZE - 1] = '\0';
+
     char *parts[256];
     int count = 0;
 
-    char work[PATH_SIZE];
-    strncpy(work, temp, PATH_SIZE);
-
-    char *p = strtok(work, "/");
-    while (p) {
-        if (strcmp(p, ".") == 0) {
-            // skip
+    char *tok = strtok(work, "/");
+    while (tok) {
+        if (strcmp(tok, ".") == 0) {
+            // ignoriši
         }
-        else if (strcmp(p, "..") == 0) {
-            if (count > 0) count--;
+        else if (strcmp(tok, "..") == 0) {
+            // idemo jedan nivo nazad, ali ne ispod root-a
+            if (count > 0)
+                count--;
         }
-        else {
-            parts[count++] = p;
+        else if (tok[0] != '\0') {
+            parts[count++] = tok;
         }
-        p = strtok(NULL, "/");
+        tok = strtok(NULL, "/");
     }
 
-    // Rebuild absolute normalized path
-    strcpy(normalized, "");
+    char relNorm[PATH_SIZE];
+    relNorm[0] = '\0';
+
     for (int i = 0; i < count; i++) {
-        strcat(normalized, "/");
-        strcat(normalized, parts[i]);
+        if (i > 0)
+            strncat(relNorm, "/", PATH_SIZE - strlen(relNorm) - 1);
+
+        strncat(relNorm, parts[i], PATH_SIZE - strlen(relNorm) - 1);
     }
 
-    if (count == 0)
-        strcpy(normalized, "/");
+    // 4) Sastavi finalnu punu putanju: homeDir + "/" + relNorm
+    if (relNorm[0] == '\0') {
+        // ostali smo u root-u korisnika
+        strncpy(outputPath, s->homeDir, PATH_SIZE);
+        outputPath[PATH_SIZE - 1] = '\0';
+    } else {
+        snprintf(outputPath, PATH_SIZE, "%s/%s", s->homeDir, relNorm);
+    }
 
-    strncpy(outputPath, normalized, PATH_SIZE);
     return 0;
 }
 
-
-
-// Check if fullPath is inside rootDir
+// =====================================================================
+// Provera da li je fullPath unutar rootDir (string-prefix provjera)
+//
+// NAPOMENA: koriste je i za gRootDir i za session->homeDir.
+//           Uz novi resolvePath, svi user pathovi AUTOMATSKI počinju
+//           sa session->homeDir, koji počinje sa gRootDir.
+// =====================================================================
 int isInsideRoot(const char *rootDir, const char *fullPath)
 {
     int len = strlen(rootDir);
 
-    // Must begin with rootDir
     if (strncmp(rootDir, fullPath, len) != 0)
         return 0;
 
-    // Accept:
-    //   /rootDir
-    //   /rootDir/
-    //   /rootDir/folder
+    // pun match (rootDir) ili rootDir/...
     if (fullPath[len] == '\0' || fullPath[len] == '/')
         return 1;
 
     return 0;
 }
 
-
-
-// Create a file or directory
+// =====================================================================
+// Create file or directory
+// =====================================================================
 int fsCreate(const char *path, int permissions, int isDirectory)
 {
     if (isDirectory) {
-        // Create directory
         if (mkdir(path, permissions) < 0) {
             perror("mkdir");
             return -1;
         }
     } else {
-        // Create empty file (We use O_EXCL so we don't overwrite exesting file)
         int fd = open(path, O_CREAT | O_EXCL, permissions);
         if (fd < 0) {
             perror("open");
@@ -98,11 +163,12 @@ int fsCreate(const char *path, int permissions, int isDirectory)
         }
         close(fd);
     }
-
     return 0;
 }
 
-// Change permissions of a file or directory
+// =====================================================================
+// Change permissions
+// =====================================================================
 int fsChmod(const char *path, int permissions)
 {
     if (chmod(path, permissions) < 0) {
@@ -112,7 +178,9 @@ int fsChmod(const char *path, int permissions)
     return 0;
 }
 
-// Move a file (Also used to rename a file)
+// =====================================================================
+// Move (rename)
+// =====================================================================
 int fsMove(const char *src, const char *dst)
 {
     if (rename(src, dst) < 0) {
@@ -122,7 +190,9 @@ int fsMove(const char *src, const char *dst)
     return 0;
 }
 
-// Delete a file or directory
+// =====================================================================
+// Delete file or directory (već je provjereno da je dir prazan ako je dir)
+// =====================================================================
 int fsDelete(const char *path)
 {
     if (unlink(path) < 0) {
@@ -132,7 +202,9 @@ int fsDelete(const char *path)
     return 0;
 }
 
-// Read file content into buffer
+// =====================================================================
+// Read file into buffer (offset + size)
+// =====================================================================
 int fsReadFile(const char *path, char *buffer, int size, int offset)
 {
     int fd = open(path, O_RDONLY);
@@ -141,14 +213,13 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
         return -1;
     }
 
-    // Move to offset (We use SEEK_SET to put measure offset form starting position)
     if (lseek(fd, offset, SEEK_SET) < 0) {
         perror("lseek");
         close(fd);
         return -1;
     }
 
-    int readBytes = read(fd, buffer, size);
+    int readBytes = (int)read(fd, buffer, size);
     if (readBytes < 0) {
         perror("read");
         close(fd);
@@ -159,7 +230,9 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
     return readBytes;
 }
 
-// Write data into a file
+// =====================================================================
+// Write to file (kreira ako ne postoji, 0700)
+// =====================================================================
 int fsWriteFile(const char *path, const char *data, int size, int offset)
 {
     int fd = open(path, O_WRONLY | O_CREAT, 0700);
@@ -168,14 +241,13 @@ int fsWriteFile(const char *path, const char *data, int size, int offset)
         return -1;
     }
 
-    // Move to offset
     if (lseek(fd, offset, SEEK_SET) < 0) {
         perror("lseek");
         close(fd);
         return -1;
     }
 
-    int written = write(fd, data, size);
+    int written = (int)write(fd, data, size);
     if (written < 0) {
         perror("write");
         close(fd);

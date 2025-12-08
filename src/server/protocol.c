@@ -1,23 +1,21 @@
-// In all of these functions we are using sendAll and reciveAll to be sure to send all a get all data
-// There are 4 possibilities:
-// 1. Sending message to client
-// 2. Receveing message form the client
-// 3. Sending response to client
-// 4. Receving resposne from a client
-// Also we are using protocol messages and protocol responses to have a oreder and for easier communication
-
 #include <stdio.h>
-#include <unistd.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../../include/network.h"
 #include "../../include/protocol.h"
 
-// Send a ProtocolMessage to the client
+// ------------------------------------------------------------
+// Send a complete ProtocolMessage structure
+// ------------------------------------------------------------
 int sendMessage(int sock, ProtocolMessage *msg)
 {
-    // Send the whole structure as raw bytes
-    // This makes communication simple and predictable
+    if (!msg) {
+        fprintf(stderr, "sendMessage: NULL pointer\n");
+        return -1;
+    }
+
+    // Always send the full struct as raw bytes
     if (sendAll(sock, msg, sizeof(ProtocolMessage)) < 0) {
         perror("sendMessage");
         return -1;
@@ -26,10 +24,16 @@ int sendMessage(int sock, ProtocolMessage *msg)
     return 0;
 }
 
-// Receive a ProtocolMessage from the client
+// ------------------------------------------------------------
+// Receive a complete ProtocolMessage structure
+// ------------------------------------------------------------
 int receiveMessage(int sock, ProtocolMessage *msg)
 {
-    // Read the fixed-size structure
+    if (!msg) {
+        fprintf(stderr, "receiveMessage: NULL pointer\n");
+        return -1;
+    }
+
     if (recvAll(sock, msg, sizeof(ProtocolMessage)) < 0) {
         perror("receiveMessage");
         return -1;
@@ -38,9 +42,16 @@ int receiveMessage(int sock, ProtocolMessage *msg)
     return 0;
 }
 
-// Send a ProtocolResponse to the client
+// ------------------------------------------------------------
+// Send a server response
+// ------------------------------------------------------------
 int sendResponse(int sock, ProtocolResponse *res)
 {
+    if (!res) {
+        fprintf(stderr, "sendResponse: NULL pointer\n");
+        return -1;
+    }
+
     if (sendAll(sock, res, sizeof(ProtocolResponse)) < 0) {
         perror("sendResponse");
         return -1;
@@ -49,9 +60,16 @@ int sendResponse(int sock, ProtocolResponse *res)
     return 0;
 }
 
-// Receive a ProtocolResponse from the client
+// ------------------------------------------------------------
+// Receive a server response
+// ------------------------------------------------------------
 int receiveResponse(int sock, ProtocolResponse *res)
 {
+    if (!res) {
+        fprintf(stderr, "receiveResponse: NULL pointer\n");
+        return -1;
+    }
+
     if (recvAll(sock, res, sizeof(ProtocolResponse)) < 0) {
         perror("receiveResponse");
         return -1;
