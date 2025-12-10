@@ -235,7 +235,16 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
 // =====================================================================
 int fsWriteFile(const char *path, const char *data, int size, int offset)
 {
-    int fd = open(path, O_WRONLY | O_CREAT, 0700);
+    int fd;
+
+    if (offset == 0) {
+        // overwrite: obriši stari sadržaj
+        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0700);
+    } else {
+        // piši od offseta, ne diraj ostatak
+        fd = open(path, O_WRONLY | O_CREAT, 0700);
+    }
+
     if (fd < 0) {
         perror("open");
         return -1;
@@ -257,3 +266,4 @@ int fsWriteFile(const char *path, const char *data, int size, int offset)
     close(fd);
     return written;
 }
+

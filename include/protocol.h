@@ -40,7 +40,7 @@ typedef struct {
     char arg1[ARG_SIZE];
     char arg2[ARG_SIZE];
     char arg3[ARG_SIZE];
-    char data[512];       // used only for WRITE/UPLOAD (optional)
+    char data[2048];       // used only for WRITE/UPLOAD (optional)
 } ProtocolMessage;
 
 // ==============================

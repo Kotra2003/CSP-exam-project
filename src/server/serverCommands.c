@@ -26,7 +26,7 @@ extern const char *gRootDir;
 static void sendStatus(int clientFd, int status, int dataSize)
 {
     ProtocolResponse res;
-    res.status = status;
+    res.status   = status;
     res.dataSize = dataSize;
     sendResponse(clientFd, &res);
 }
@@ -55,13 +55,37 @@ static int ensureLoggedIn(int clientFd, Session *session, const char *cmdName)
 static void debugCommand(const char *name, ProtocolMessage *msg, Session *s)
 {
     printf("[%s] cmd=%d, arg1='%s', arg2='%s', arg3='%s', loggedIn=%d\n",
-        name,
-        msg->command,
-        msg->arg1,
-        msg->arg2,
-        msg->arg3,
-        s ? s->isLoggedIn : -1);
+           name,
+           msg->command,
+           msg->arg1,
+           msg->arg2,
+           msg->arg3,
+           s ? s->isLoggedIn : -1);
     fflush(stdout);
+}
+
+// ================================================================
+// Privilege helpers: privremeni root samo kad treba
+// ================================================================
+static int elevateToRoot(uid_t *old_euid)
+{
+    *old_euid = geteuid();
+
+    // Pokušaj da postaneš root (radi samo ako je proces startan sa sudo ./server)
+    if (seteuid(0) != 0) {
+        perror("seteuid(0)");
+        return -1;
+    }
+    return 0;
+}
+
+static void dropFromRoot(uid_t old_euid)
+{
+    if (seteuid(old_euid) != 0) {
+        perror("seteuid(revert)");
+        // Ako ovo faila, proces ostaje sa višim privilegijama – u realnom kodu bi ovdje
+        // vjerovatno prekinuli proces. Za projekat je dovoljno da logujemo.
+    }
 }
 
 // ================================================================
@@ -129,19 +153,21 @@ int handleLogin(int clientFd, ProtocolMessage *msg, Session *session)
 }
 
 // ================================================================
-// CREATE USER
+// CREATE USER (sa privremenim root-om)
 // ================================================================
 int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("CREATE_USER", msg, session);
 
+    // 1) Osnovne provjere koje ne traže root
     if (msg->arg1[0] == '\0' || msg->arg2[0] == '\0') {
+        printf("[CREATE_USER] ERROR: missing <username> or <permissions>\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    const char *username = msg->arg1;
-    int permissions = (int)strtol(msg->arg2, NULL, 8);
+    const char *username  = msg->arg1;
+    int permissions       = (int)strtol(msg->arg2, NULL, 8);
 
     if (permissions <= 0) {
         printf("[CREATE_USER] ERROR invalid permissions\n");
@@ -153,68 +179,94 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, username);
 
     if (fileExists(homePath)) {
-        printf("[CREATE_USER] ERROR: '%s' exists\n", homePath);
+        printf("[CREATE_USER] ERROR: '%s' already exists\n", homePath);
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 1) SYSTEM USER CREATION
-    pid_t pid = fork();
-    if (pid < 0) {
-        perror("fork");
-        sendErrorMsg(clientFd);
-        return 0;
-    }
-    if (pid == 0) {
-        execlp("adduser", "adduser",
-               "--disabled-password",
-               "--gecos", "",
-               username,
-               NULL);
-        perror("execlp adduser");
-        exit(1);
-    }
-
-    int status;
-    waitpid(pid, &status, 0);
-
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        printf("[CREATE_USER] adduser failed\n");
+    // 2) Pokušaj da privremeno postaneš root
+    uid_t old_euid;
+    if (elevateToRoot(&old_euid) < 0) {
+        printf("[CREATE_USER] ERROR: server has no root privileges (run with sudo to create system users).\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 2) CREATE HOME DIRECTORY
-    if (mkdir(homePath, permissions) < 0) {
-        perror("mkdir");
-        sendErrorMsg(clientFd);
-        return 0;
-    }
+    int error = 0;
 
-    // 3) SET PERMISSIONS
-    if (chmod(homePath, permissions) < 0) {
-        perror("chmod");
-        sendErrorMsg(clientFd);
-        return 0;
-    }
+    // 3) ROOT SEKCIJA: adduser, mkdir, chmod, chown
+    do {
+        // 3.1 create system user
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            error = 1;
+            break;
+        }
+        if (pid == 0) {
+            execlp("adduser", "adduser",
+                   "--disabled-password",
+                   "--gecos", "",
+                   username,
+                   NULL);
+            perror("execlp adduser");
+            _exit(1);
+        }
 
-    // 4) SET OWNER TO THIS USER + SHARED GROUP
-    struct group *grp = getgrnam("csapgroup");
-    if (!grp) {
-        printf("[CREATE_USER] ERROR: group csapgroup not found\n");
-        sendErrorMsg(clientFd);
-        return 0;
-    }
+        int status;
+        if (waitpid(pid, &status, 0) < 0) {
+            perror("waitpid");
+            error = 1;
+            break;
+        }
 
-    struct passwd *pwd = getpwnam(username);
-    if (!pwd) {
-        printf("[CREATE_USER] ERROR: passwd entry missing\n");
-        sendErrorMsg(clientFd);
-        return 0;
-    }
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            printf("[CREATE_USER] adduser failed (exit=%d)\n", WEXITSTATUS(status));
+            error = 1;
+            break;
+        }
 
-    if (chown(homePath, pwd->pw_uid, grp->gr_gid) < 0) {
-        perror("chown");
+        // 3.2 create home directory inside gRootDir
+        if (mkdir(homePath, permissions) < 0) {
+            perror("mkdir");
+            error = 1;
+            break;
+        }
+
+        // 3.3 set permissions
+        if (chmod(homePath, permissions) < 0) {
+            perror("chmod");
+            error = 1;
+            break;
+        }
+
+        // 3.4 set owner and group
+        struct group *grp = getgrnam("csapgroup");
+        if (!grp) {
+            printf("[CREATE_USER] ERROR: group 'csapgroup' not found\n");
+            error = 1;
+            break;
+        }
+
+        struct passwd *pwd = getpwnam(username);
+        if (!pwd) {
+            printf("[CREATE_USER] ERROR: passwd entry missing for '%s'\n", username);
+            error = 1;
+            break;
+        }
+
+        if (chown(homePath, pwd->pw_uid, grp->gr_gid) < 0) {
+            perror("chown");
+            error = 1;
+            break;
+        }
+
+    } while (0);
+
+    // 4) Obavezno vrati nazad stari EUID (čak i ako je bilo errova)
+    dropFromRoot(old_euid);
+
+    if (error) {
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -238,13 +290,29 @@ int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
     const char *permArg = msg->arg2;
     const char *typeArg = msg->arg3;
 
-    if (!pathArg[0] || !permArg[0] || !typeArg[0]) {
+    if (!pathArg[0] || !permArg[0]) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    int permissions = (int)strtol(permArg, NULL, 8);
-    int isDir = (strcmp(typeArg, "dir") == 0);
+    // ============================================
+    // VALIDACIJA PERMISSIONA (0–777 OKTALNO)
+    // ============================================
+    char *endptr;
+    long perms = strtol(permArg, &endptr, 8);
+
+    if (*endptr != '\0' || perms < 0 || perms > 0777) {
+        printf("[CREATE] invalid permissions: %s\n", permArg);
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    int permissions = (int)perms;
+
+    // ============================================
+    // DA LI JE DIRECTORY?
+    // ============================================
+    int isDir = (strcmp(typeArg, "-d") == 0);
 
     char fullPath[PATH_SIZE];
     if (resolvePath(session, pathArg, fullPath) < 0) {
@@ -252,12 +320,7 @@ int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    if (!isInsideRoot(session->homeDir, fullPath)) {
-        sendErrorMsg(clientFd);
-        return 0;
-    }
-
-    if (fileExists(fullPath)) {
+    if (!isInsideRoot(session->homeDir, fullPath) || fileExists(fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -283,13 +346,31 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
 
     char fullPath[PATH_SIZE];
 
+    // -----------------------------
+    // Validate args exist
+    // -----------------------------
     if (msg->arg1[0] == '\0' || msg->arg2[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    int permissions = (int)strtol(msg->arg2, NULL, 8);
+    // -----------------------------
+    // Validate permissions (0–777)
+    // -----------------------------
+    char *endptr;
+    long perms = strtol(msg->arg2, &endptr, 8);
 
+    if (*endptr != '\0' || perms < 0 || perms > 0777) {
+        printf("[CHMOD] invalid permissions: %s\n", msg->arg2);
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    int permissions = (int)perms;
+
+    // -----------------------------
+    // Resolve full path
+    // -----------------------------
     if (resolvePath(session, msg->arg1, fullPath) < 0 ||
         !isInsideRoot(session->homeDir, fullPath) ||
         !fileExists(fullPath)) {
@@ -298,7 +379,24 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    if (fsChmod(fullPath, permissions) < 0) {
+    // -----------------------------
+    // Acquire lock (IMPORTANT)
+    // -----------------------------
+    if (acquireFileLock(fullPath) < 0) {
+        printf("[CHMOD] file is locked: %s\n", fullPath);
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    // -----------------------------
+    // Do chmod
+    // -----------------------------
+    int ok = fsChmod(fullPath, permissions);
+
+    // Release lock
+    releaseFileLock(fullPath);
+
+    if (ok < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -400,6 +498,9 @@ int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 // LIST
 // ================================================================
+// ================================================================
+// LIST
+// ================================================================
 int handleList(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("LIST", msg, session);
@@ -411,20 +512,37 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     char output[8192];
     output[0] = '\0';
 
+    // --------------------------------------------------------
+    // 1) Odredi bazni direktorij koji listamo
+    // --------------------------------------------------------
     if (msg->arg1[0] == '\0') {
+        // bez argumenata → trenutni dir korisnika
         strncpy(fullPath, session->currentDir, PATH_SIZE);
-    } else {
+        fullPath[PATH_SIZE - 1] = '\0';
+    }
+    else if (msg->arg1[0] == '/') {
+        // ABSOLUTE VIRTUAL PATH:
+        //   /admin      →  <gRootDir>/admin
+        //   /jana/docs  →  <gRootDir>/jana/docs
+        snprintf(fullPath, PATH_SIZE, "%s/%s", gRootDir, msg->arg1 + 1);
+    }
+    else {
+        // Relativna putanja → standardno sandboxovanje preko resolvePath
         if (resolvePath(session, msg->arg1, fullPath) < 0) {
             sendErrorMsg(clientFd);
             return 0;
         }
     }
 
+    // Mora ostati unutar globalnog root-a
     if (!isInsideRoot(gRootDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // --------------------------------------------------------
+    // 2) Otvori direktorij i složi izlaz
+    // --------------------------------------------------------
     DIR *dir = opendir(fullPath);
     if (!dir) {
         perror("opendir");
@@ -435,7 +553,7 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL)
     {
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") || strstr(entry->d_name, ".lock") != NULL)
             continue;
 
         char entryPath[PATH_SIZE];
@@ -445,15 +563,12 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
         if (stat(entryPath, &st) < 0)
             continue;
 
-        int perms = st.st_mode & 0777;
-        long size = (long)st.st_size;
+        int  perms = st.st_mode & 0777;
+        long size  = (long)st.st_size;
 
         char line[512];
-        snprintf(line, sizeof(line),
-                 "%s  %03o  %ld\n",
-                 entry->d_name,
-                 perms,
-                 size);
+        snprintf(line, sizeof(line), "%s  %03o  %ld\n",
+                 entry->d_name, perms, size);
 
         strncat(output, line, sizeof(output) - strlen(output) - 1);
     }
@@ -516,8 +631,8 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    char *buffer = NULL;
-    int readBytes = 0;
+    char *buffer   = NULL;
+    int   readBytes = 0;
 
     if (toRead > 0) {
         buffer = malloc(toRead);
@@ -599,7 +714,7 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     char *buffer = NULL;
-    int written = 0;
+    int   written = 0;
 
     if (size > 0) {
         buffer = malloc(size);
@@ -634,7 +749,8 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
     releaseFileLock(fullPath);
 
     sendOk(clientFd, written);
-    printf("[WRITE] %d bytes -> '%s' (offset=%d)\n", written, fullPath, offset);
+    printf("[WRITE] %d bytes -> '%s' (offset=%d)\n", written, fullPath, offset);\
+    printf("SERVER RECEIVED OFFSET = '%s'\n", msg->arg2);
     return 0;
 }
 
@@ -655,27 +771,33 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
 
     char fullPath[PATH_SIZE];
 
-    // Resolve relative to user directory
     if (resolvePath(session, msg->arg1, fullPath) < 0 ||
-        !isInsideRoot(session->homeDir, fullPath)) {
+        !isInsideRoot(session->homeDir, fullPath) ||
+        !fileExists(fullPath)) {
 
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Check existence
-    if (!fileExists(fullPath)) {
-        sendErrorMsg(clientFd);
-        return 0;
-    }
-
-    // Acquire lock to avoid races
+    // ----------------------------------------
+    // Acquire lock (prevents deleting in-use files)
+    // ----------------------------------------
     if (acquireFileLock(fullPath) < 0) {
-        printf("[DELETE] file in use '%s'\n", fullPath);
+        printf("[DELETE] file in use: %s\n", fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // ----------------------------------------
+    // Delete .lock file if exists
+    // ----------------------------------------
+    char lockPath[PATH_SIZE + 10];
+    snprintf(lockPath, sizeof(lockPath), "%s.lock", fullPath);
+    unlink(lockPath);  // ignore errors
+
+    // ----------------------------------------
+    // Delete file or directory recursively
+    // ----------------------------------------
     int ok = removeRecursive(fullPath);
 
     releaseFileLock(fullPath);
@@ -685,11 +807,9 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    printf("[DELETE] Removed '%s'\n", fullPath);
     sendOk(clientFd, 0);
     return 0;
 }
-
 
 // ================================================================
 // UPLOAD
@@ -811,17 +931,20 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 }
 
 // ================================================================
-// DELETE USER
+// DELETE USER (sa privremenim root-om)
 // ================================================================
 int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("DELETE_USER", msg, session);
 
-    if (!session->isLoggedIn  || strcmp(session->username, "admin") != 0) {
+    // 1) Samo admin smije brisati korisnike
+    if (!session->isLoggedIn || strcmp(session->username, "admin") != 0) {
+        printf("[DELETE_USER] ERROR: only 'admin' can delete users\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 2) Mora postojati ime korisnika za brisanje
     if (msg->arg1[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
@@ -829,11 +952,14 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 
     const char *target = msg->arg1;
 
+    // 3) Admin ne smije brisati sam sebe
     if (strcmp(target, "admin") == 0) {
+        printf("[DELETE_USER] ERROR: admin account cannot be deleted\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 4) Složimo path do home foldera
     char homePath[PATH_SIZE];
     snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, target);
 
@@ -843,24 +969,50 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        execlp("userdel", "userdel", "-f", target, NULL);
-        perror("userdel");
-        exit(1);
-    }
-
-    int status;
-    waitpid(pid, &status, 0);
-
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        printf("[DELETE_USER] userdel failed\n");
+    // 5) Privremeno digni privilegije na root
+    uid_t old_euid;
+    if (elevateToRoot(&old_euid) < 0) {
+        printf("[DELETE_USER] ERROR: server not running with sudo.\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    if (removeRecursive(homePath) < 0) {
-        printf("[DELETE_USER] rm -rf failed: %s\n", homePath);
+    int error = 0;
+
+    // 6) userdel + remove directory
+    do {
+        // userdel
+        pid_t pid = fork();
+        if (pid < 0) { perror("fork"); error = 1; break; }
+
+        if (pid == 0) {
+            execlp("userdel", "userdel", "-f", target, NULL);
+            perror("userdel");
+            _exit(1);
+        }
+
+        int status;
+        if (waitpid(pid, &status, 0) < 0) { perror("waitpid"); error = 1; break; }
+
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            printf("[DELETE_USER] userdel failed\n");
+            error = 1;
+            break;
+        }
+
+        // rm -rf home dir
+        if (removeRecursive(homePath) < 0) {
+            printf("[DELETE_USER] rm -rf failed: %s\n", homePath);
+            error = 1;
+            break;
+        }
+
+    } while (0);
+
+    // 7) Vrati privilegije nazad
+    dropFromRoot(old_euid);
+
+    if (error) {
         sendErrorMsg(clientFd);
         return 0;
     }

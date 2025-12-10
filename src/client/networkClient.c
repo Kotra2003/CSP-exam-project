@@ -1,3 +1,5 @@
+// src/client/networkClient.c
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,22 +43,24 @@ int connectToServer(const char *ip, int port)
 }
 
 // ------------------------------------------------------------
-// Reliable send
+// Reliable send (CLIENT SIDE)
+// Ako veza pukne → ispiši poruku i UGASI cijeli klijent.
 // ------------------------------------------------------------
 int sendAll(int sock, const void *buffer, int size)
 {
     int total = 0;
 
     while (total < size) {
-        int sent = send(sock, (char *)buffer + total, size - total, 0);
+        int sent = send(sock, (const char *)buffer + total, size - total, 0);
 
         if (sent < 0) {
             perror("sendAll");
-            return -1;
+            fprintf(stderr, "[FATAL] Connection to server lost. Exiting client.\n");
+            exit(1);
         }
         if (sent == 0) {
-            fprintf(stderr, "sendAll: connection closed\n");
-            return -1;
+            fprintf(stderr, "[FATAL] Connection closed by server (send).\n");
+            exit(1);
         }
 
         total += sent;
@@ -66,7 +70,8 @@ int sendAll(int sock, const void *buffer, int size)
 }
 
 // ------------------------------------------------------------
-// Reliable recv
+// Reliable recv (CLIENT SIDE)
+// Ako veza pukne → ispiši poruku i UGASI cijeli klijent.
 // ------------------------------------------------------------
 int recvAll(int sock, void *buffer, int size)
 {
@@ -77,11 +82,12 @@ int recvAll(int sock, void *buffer, int size)
 
         if (r < 0) {
             perror("recvAll");
-            return -1;
+            fprintf(stderr, "[FATAL] Connection to server lost. Exiting client.\n");
+            exit(1);
         }
         if (r == 0) {
-            fprintf(stderr, "recvAll: connection closed\n");
-            return -1;
+            fprintf(stderr, "[FATAL] Connection closed by server (recv).\n");
+            exit(1);
         }
 
         total += r;
@@ -98,14 +104,22 @@ int uploadFile(int sock, const char *localPath, const char *remotePath)
     FILE *f = fopen(localPath, "rb");
     if (!f) {
         perror("fopen");
-        return -1;
+        return -1;   // lokalni problem (fajl ne postoji itd.)
     }
 
     fseek(f, 0, SEEK_END);
-    int size = ftell(f);
+    long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    // Send upload command
+    if (fsize < 0) {
+        perror("ftell");
+        fclose(f);
+        return -1;
+    }
+
+    int size = (int)fsize;
+
+    // Pripremi upload komandu
     ProtocolMessage msg;
     memset(&msg, 0, sizeof(msg));
 
@@ -113,27 +127,53 @@ int uploadFile(int sock, const char *localPath, const char *remotePath)
     strncpy(msg.arg1, remotePath, sizeof(msg.arg1));
     snprintf(msg.arg2, sizeof(msg.arg2), "%d", size);
 
-    send(sock, &msg, sizeof(msg), 0);
+    // Pošalji poruku serveru (koristi sendAll → fatal na grešci)
+    sendAll(sock, &msg, sizeof(msg));
 
-    // Receive OK from server
+    // Primi odgovor od servera
     ProtocolResponse res;
-    if (recv(sock, &res, sizeof(res), 0) <= 0 || res.status != STATUS_OK) {
+    recvAll(sock, &res, sizeof(res));
+
+    if (res.status != STATUS_OK) {
         printf("[UPLOAD] server refused upload\n");
         fclose(f);
         return -1;
     }
 
-    // Send file content
-    char *buffer = malloc(size);
-    fread(buffer, 1, size, f);
+    // Učitaj fajl u buffer
+    char *buffer = NULL;
+    if (size > 0) {
+        buffer = malloc(size);
+        if (!buffer) {
+            printf("[UPLOAD] Out of memory\n");
+            fclose(f);
+            return -1;
+        }
+
+        int readBytes = (int)fread(buffer, 1, size, f);
+        if (readBytes != size) {
+            printf("[UPLOAD] fread mismatch (%d/%d)\n", readBytes, size);
+            free(buffer);
+            fclose(f);
+            return -1;
+        }
+    }
     fclose(f);
 
-    sendAll(sock, buffer, size);
-    free(buffer);
+    // Pošalji fajl serveru (ako ima sadržaja)
+    if (size > 0) {
+        sendAll(sock, buffer, size);
+        free(buffer);
+    }
 
-    // Receive final OK
-    recv(sock, &res, sizeof(res), 0);
-    return (res.status == STATUS_OK) ? 0 : -1;
+    // Primi završni OK od servera
+    recvAll(sock, &res, sizeof(res));
+    if (res.status != STATUS_OK) {
+        printf("[UPLOAD] final response not OK\n");
+        return -1;
+    }
+
+    return 0;
 }
 
 // ------------------------------------------------------------
@@ -141,26 +181,49 @@ int uploadFile(int sock, const char *localPath, const char *remotePath)
 // ------------------------------------------------------------
 int downloadFile(int sock, const char *remotePath, const char *localPath)
 {
-    // Send download command
+    // Pošalji download komandu
     ProtocolMessage msg;
     memset(&msg, 0, sizeof(msg));
 
     msg.command = CMD_DOWNLOAD;
     strncpy(msg.arg1, remotePath, sizeof(msg.arg1));
 
-    send(sock, &msg, sizeof(msg), 0);
+    // header ka serveru
+    sendAll(sock, &msg, sizeof(msg));
 
-    // Receive server response
+    // Primi odgovor servera
     ProtocolResponse res;
-    if (recv(sock, &res, sizeof(res), 0) <= 0 || res.status != STATUS_OK) {
+    recvAll(sock, &res, sizeof(res));
+
+    if (res.status != STATUS_OK) {
         printf("[DOWNLOAD] server refused\n");
         return -1;
     }
 
     int size = res.dataSize;
-    if (size <= 0) return -1;
+    if (size < 0) {
+        printf("[DOWNLOAD] invalid size\n");
+        return -1;
+    }
+
+    // Ako nema ništa za preuzeti
+    if (size == 0) {
+        FILE *fempty = fopen(localPath, "wb");
+        if (!fempty) {
+            perror("fopen");
+            return -1;
+        }
+        fclose(fempty);
+        return 0;
+    }
 
     char *buffer = malloc(size);
+    if (!buffer) {
+        printf("[DOWNLOAD] Out of memory\n");
+        return -1;
+    }
+
+    // Primi sadržaj fajla
     recvAll(sock, buffer, size);
 
     FILE *f = fopen(localPath, "wb");
@@ -170,7 +233,12 @@ int downloadFile(int sock, const char *remotePath, const char *localPath)
         return -1;
     }
 
-    fwrite(buffer, 1, size, f);
+    int written = (int)fwrite(buffer, 1, size, f);
+    if (written != size) {
+        printf("[DOWNLOAD] fwrite mismatch (%d/%d)\n", written, size);
+        // ali fajl je ipak skoro kompletan; tvoj call da li ćeš brisati
+    }
+
     fclose(f);
     free(buffer);
 

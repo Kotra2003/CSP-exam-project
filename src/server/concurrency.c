@@ -9,7 +9,7 @@
 static FileLock locks[MAX_LOCKS];
 
 // ------------------------------------------------------------
-// Initialize local lock table
+// Initialize lock table
 // ------------------------------------------------------------
 void initLocks()
 {
@@ -20,18 +20,13 @@ void initLocks()
     }
 }
 
-// ------------------------------------------------------------
-// Find or create lock entry for a path
-// ------------------------------------------------------------
 static FileLock* getLockEntry(const char *path)
 {
-    // Find existing
     for (int i = 0; i < MAX_LOCKS; i++) {
         if (strcmp(locks[i].path, path) == 0)
             return &locks[i];
     }
 
-    // Create new
     for (int i = 0; i < MAX_LOCKS; i++) {
         if (locks[i].path[0] == '\0') {
             strncpy(locks[i].path, path, PATH_SIZE);
@@ -44,19 +39,22 @@ static FileLock* getLockEntry(const char *path)
 }
 
 // ------------------------------------------------------------
-// Acquire EXCLUSIVE lock using fcntl
+// BLOCKING EXCLUSIVE LOCK
+//
+// Ovo je ključ razlike:
+//  - koristimo F_SETLKW → blokira dok se lock ne oslobodi
+//  - NEMA fail -1 jer blokira
+//  - thread-safe i fork-friendly
 // ------------------------------------------------------------
 int acquireFileLock(const char *path)
 {
     FileLock *l = getLockEntry(path);
     if (!l) return -1;
 
-    // Already locked in THIS process
-    if (l->locked == 1) {
+    // već imamo lock u ovom procesu
+    if (l->locked)
         return 0;
-    }
 
-    // Create a sidecar .lock file
     char lockPath[PATH_SIZE + 10];
     snprintf(lockPath, sizeof(lockPath), "%s.lock", path);
 
@@ -66,34 +64,30 @@ int acquireFileLock(const char *path)
         return -1;
     }
 
-    // Prepare exclusive lock
     struct flock fl;
     memset(&fl, 0, sizeof(fl));
-    fl.l_type = F_WRLCK;   // exclusive lock
+    fl.l_type = F_WRLCK;     // EXCLUSIVE lock
     fl.l_whence = SEEK_SET;
-    fl.l_start = 0;
-    fl.l_len = 0;
 
-    // NON-BLOCKING attempt
-    if (fcntl(fd, F_SETLK, &fl) < 0) {
+    // 🔥 BLOCKING LOCK HERE:
+    // F_SETLKW → ČEKA dok neko ne pusti lock
+    if (fcntl(fd, F_SETLKW, &fl) < 0) {
+        perror("fcntl(F_SETLKW)");
         close(fd);
-        return -1;  // lock is already held by another process
+        return -1;
     }
 
-    // Success
+    // uspjeh
     l->fd = fd;
     l->locked = 1;
-
     return 0;
 }
 
-// ------------------------------------------------------------
-// Release file lock
-// ------------------------------------------------------------
 void releaseFileLock(const char *path)
 {
     FileLock *l = getLockEntry(path);
-    if (!l || l->locked == 0) return;
+    if (!l || !l->locked)
+        return;
 
     struct flock fl;
     memset(&fl, 0, sizeof(fl));

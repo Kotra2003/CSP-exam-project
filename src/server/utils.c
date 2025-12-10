@@ -62,6 +62,11 @@ int fileExists(const char *path)
 // =======================================================
 int removeRecursive(const char *path)
 {
+    // Remove associated .lock file if present
+    char lockFile[PATH_SIZE + 10];
+    snprintf(lockFile, sizeof(lockFile), "%s.lock", path);
+    unlink(lockFile); // ignore errors
+
     struct stat st;
     if (lstat(path, &st) < 0) {
         perror("lstat");
