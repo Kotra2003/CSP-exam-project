@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "../../include/clientCommands.h"
 #include "../../include/protocol.h"
@@ -21,6 +22,35 @@ extern int downloadFile(int sock, const char *remotePath, const char *localPath)
 static const char *g_ip = NULL;
 static int g_port = 0;
 static char g_username[64] = "";      // store current logged user
+
+// ---------------------------------------------------------------------------
+// Background process table (for blocking exit while they run)
+// ---------------------------------------------------------------------------
+static pid_t bgPids[128];
+static int bgCount = 0;
+
+void registerBackgroundProcess(pid_t pid)
+{
+    if (bgCount < 128) {
+        bgPids[bgCount++] = pid;
+    }
+}
+
+void unregisterBackgroundProcess(pid_t pid)
+{
+    for (int i = 0; i < bgCount; i++) {
+        if (bgPids[i] == pid) {
+            // zamijeni sa zadnjim i smanji broj
+            bgPids[i] = bgPids[--bgCount];
+            return;
+        }
+    }
+}
+
+static int hasActiveBackgroundProcesses(void)
+{
+    return (bgCount > 0);
+}
 
 void setGlobalServerInfo(const char *ip, int port)
 {
@@ -93,6 +123,18 @@ static int backgroundLogin(int bgSock)
 // ============================================================================
 // BACKGROUND UPLOAD
 // ============================================================================
+//
+// Ideja:
+//  - fork()
+//  - CHILD:
+//      * odvoji se od tastature (close(STDIN_FILENO))
+//      * ignoriše SIGINT/SIGTERM da ga Ctrl+C ne razbije
+//      * napravi novu konekciju + login
+//      * odradi uploadFile(bgSock, local, remote)
+//      * ispiše PDF poruku:
+//        [Background] Command: upload <server path> <client path> concluded
+//  - PARENT: registruje PID i samo nastavlja shell
+// ============================================================================
 static void startBackgroundUpload(const char *local, const char *remote)
 {
     pid_t pid = fork();
@@ -101,34 +143,62 @@ static void startBackgroundUpload(const char *local, const char *remote)
         return;
     }
 
-    if (pid == 0) {
-        int bgSock = connectToServer(g_ip, g_port);
-        if (bgSock < 0) {
-            printf("[BG UPLOAD] Failed to connect\n");
-            _exit(1);
-        }
-
-        if (backgroundLogin(bgSock) < 0) {
-            close(bgSock);
-            _exit(1);
-        }
-
-        printf("[BG UPLOAD] Started PID=%d: %s -> %s\n", getpid(), local, remote);
-
-        int result = uploadFile(bgSock, local, remote);
-        close(bgSock);
-
-        if (result == 0)
-            printf("[BG UPLOAD] Finished OK\n");
-        else
-            printf("[BG UPLOAD] FAILED\n");
-
-        _exit(0);
+    if (pid > 0) {
+        // PARENT
+        registerBackgroundProcess(pid);
+        printf("[Background] Upload started (PID=%d)\n", pid);
+        fflush(stdout);
+        return;
     }
+
+    // ---------------- CHILD PROCESS (BACKGROUND) ----------------
+
+    // 1) Odvoji se od tastature: ne želimo da dijete ikad čita sa STDIN
+    close(STDIN_FILENO);
+
+    // 2) Ctrl+C u terminalu da ne zaustavlja ovaj proces
+    signal(SIGINT, SIG_IGN);
+    signal(SIGTERM, SIG_IGN);
+
+    // 3) Nova konekcija ka serveru
+    int bgSock = connectToServer(g_ip, g_port);
+    if (bgSock < 0) {
+        printf("[BG UPLOAD] Failed to connect\n");
+        _exit(1);
+    }
+
+    // 4) Login istog korisnika kao u foreground klijentu
+    if (backgroundLogin(bgSock) < 0) {
+        close(bgSock);
+        _exit(1);
+    }
+
+    printf("[BG UPLOAD] Started PID=%d: %s -> %s\n", getpid(), local, remote);
+
+    // vještačko kašnjenje da se vidi da je background
+    sleep(5);  // Test for background
+
+    int result = uploadFile(bgSock, local, remote);
+    close(bgSock);
+
+    if (result == 0) {
+        // PDF format:
+        // [Background] Command: upload <server path> <client path> concluded
+        printf("[Background] Command: upload %s %s concluded\n", remote, local);
+    } else {
+        printf("[Background] Command: upload %s %s FAILED\n", remote, local);
+    }
+
+    fflush(stdout);
+    _exit(0);
 }
 
 // ============================================================================
 // BACKGROUND DOWNLOAD
+// ============================================================================
+//
+// Analogno upload-u, ali:
+//  [Background] Command: download <server path> <client path> concluded
 // ============================================================================
 static void startBackgroundDownload(const char *remote, const char *local)
 {
@@ -138,34 +208,58 @@ static void startBackgroundDownload(const char *remote, const char *local)
         return;
     }
 
-    if (pid == 0) {
-        int bgSock = connectToServer(g_ip, g_port);
-        if (bgSock < 0) {
-            printf("[BG DOWNLOAD] Failed to connect\n");
-            _exit(1);
-        }
-
-        if (backgroundLogin(bgSock) < 0) {
-            close(bgSock);
-            _exit(1);
-        }
-
-        printf("[BG DOWNLOAD] Started PID=%d: %s -> %s\n", getpid(), remote, local);
-
-        int result = downloadFile(bgSock, remote, local);
-        close(bgSock);
-
-        if (result == 0)
-            printf("[BG DOWNLOAD] Finished OK\n");
-        else
-            printf("[BG DOWNLOAD] FAILED\n");
-
-        _exit(0);
+    if (pid > 0) {
+        // PARENT
+        registerBackgroundProcess(pid);
+        printf("[Background] Download started (PID=%d)\n", pid);
+        fflush(stdout);
+        return;
     }
+
+    // ---------------- CHILD PROCESS (BACKGROUND) ----------------
+
+    // 1) Odvoji se od tastature
+    close(STDIN_FILENO);
+
+    // 2) Ignoriši Ctrl+C / SIGTERM
+    signal(SIGINT, SIG_IGN);
+    signal(SIGTERM, SIG_IGN);
+
+    // 3) Nova konekcija ka serveru
+    int bgSock = connectToServer(g_ip, g_port);
+    if (bgSock < 0) {
+        printf("[BG DOWNLOAD] Failed to connect\n");
+        _exit(1);
+    }
+
+    // 4) Login istog korisnika
+    if (backgroundLogin(bgSock) < 0) {
+        close(bgSock);
+        _exit(1);
+    }
+
+    printf("[BG DOWNLOAD] Started PID=%d: %s -> %s\n", getpid(), remote, local);
+
+    // vještačko kašnjenje da se vidi da je background
+    sleep(5);
+
+    int result = downloadFile(bgSock, remote, local);
+    close(bgSock);
+
+    if (result == 0) {
+        // PDF format:
+        // [Background] Command: download <server path> <client path> concluded
+        printf("[Background] Command: download %s %s concluded\n", remote, local);
+    } else {
+        printf("[Background] Command: download %s %s FAILED\n", remote, local);
+    }
+
+    fflush(stdout);
+    _exit(0);
 }
 
 // ============================================================================
-// MAIN COMMAND HANDLER (FULL ORIGINAL + NEW BACKGROUND)
+// MAIN COMMAND HANDLER (FULL ORIGINAL + NEW BACKGROUND + EXIT BLOCK)
 // ============================================================================
 int clientHandleInput(int sock, char *input)
 {
@@ -359,6 +453,8 @@ int clientHandleInput(int sock, char *input)
             return 0;
         }
 
+        // Ovdje ostavljamo tvoje ponašanje sa Ctrl+D.
+        // "Završetak unosa: ENTER pa Ctrl+D"
         char tmp[4096];
         char *buffer = NULL;
         int total = 0, cap = 0, r;
@@ -400,6 +496,7 @@ int clientHandleInput(int sock, char *input)
     if (strcmp(cmd, "upload") == 0) {
 
         if (n == 4 && strcmp(tokens[1], "-b") == 0) {
+            // BACKGROUND
             startBackgroundUpload(tokens[2], tokens[3]);
             return 0;
         }
@@ -419,6 +516,7 @@ int clientHandleInput(int sock, char *input)
     if (strcmp(cmd, "download") == 0) {
 
         if (n == 4 && strcmp(tokens[1], "-b") == 0) {
+            // BACKGROUND
             startBackgroundDownload(tokens[2], tokens[3]);
             return 0;
         }
@@ -434,8 +532,16 @@ int clientHandleInput(int sock, char *input)
     }
 
     // -----------------------------------------------------------
-    // EXIT
+    // EXIT (blokiran dok postoje active background procesi)
+// -----------------------------------------------------------
     if (strcmp(cmd, "exit") == 0) {
+
+        if (hasActiveBackgroundProcesses()) {
+            printf("[ERROR] Cannot exit: background transfers still running.\n");
+            printf("        Wait for them to finish.\n");
+            return 0;
+        }
+
         sendSimpleCommand(sock, CMD_EXIT, NULL, NULL, NULL);
         return 1;
     }

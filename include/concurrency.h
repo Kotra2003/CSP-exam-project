@@ -6,18 +6,19 @@
 #define MAX_LOCKS 128
 
 typedef struct {
-    char path[PATH_SIZE];   // file path being locked
-    int fd;                 // lock file descriptor
-    int locked;             // 1 if lock held by THIS process
+    char path[PATH_SIZE];   // path fajla/direktorijuma koji zaključavamo
+    int fd;                 // file descriptor koji drži fcntl lock
+    int locked;             // 1 ako je lock aktivan u ovom procesu
 } FileLock;
 
-// Initialize local lock table
+// Inicijalizacija tabele lock-ova (nije obavezno ako je .bss = 0, ali držimo za svaki slučaj)
 void initLocks();
 
-// Acquire EXCLUSIVE lock. Returns 0 = success, -1 = fail.
+// Ekskluzivni lock za dati path (blokira dok ne postane slobodan).
+// Vraća 0 na uspjeh, -1 na grešku.
 int acquireFileLock(const char *path);
 
-// Release EXCLUSIVE lock
+// Oslobađa lock za dati path (ako postoji).
 void releaseFileLock(const char *path);
 
 #endif
