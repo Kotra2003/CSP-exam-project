@@ -37,9 +37,7 @@ static volatile sig_atomic_t shutdownRequested = 0;
 static void handleChildSignal(int sig)
 {
     (void)sig;
-    while (waitpid(-1, NULL, WNOHANG) > 0) {
-        // samo čistimo zombije
-    }
+    while (waitpid(-1, NULL, WNOHANG) > 0) {}
 }
 
 // ------------------------------------------------------------
@@ -52,7 +50,7 @@ static void handleShutdownSignal(int sig)
 }
 
 // ------------------------------------------------------------
-// Provjera da li je rootDir kritičan sistemski put (sigurnosni check)
+// Provjera da li je rootDir kritičan sistemski put
 // ------------------------------------------------------------
 static int isDangerousRoot(const char *dir)
 {
@@ -77,7 +75,7 @@ static int ensureRootDirectory(const char *path)
             fprintf(stderr, "ERROR: '%s' exists but is not a directory.\n", path);
             return -1;
         }
-        return 0;   // već postoji, sve ok
+        return 0;
     }
 
     if (mkdir(path, 0755) < 0) {
@@ -90,25 +88,7 @@ static int ensureRootDirectory(const char *path)
 }
 
 // ------------------------------------------------------------
-// Validacija porta (mora biti 1–65535)
-// ------------------------------------------------------------
-static int validatePort(const char *p)
-{
-    for (int i = 0; p[i]; i++) {
-        if (!isdigit((unsigned char)p[i])) {
-            return -1;
-        }
-    }
-
-    int val = atoi(p);
-    if (val < 1 || val > 65535)
-        return -1;
-
-    return val;
-}
-
-// ------------------------------------------------------------
-// Lijep banner pri startu (čisto kozmetika)
+// Banner
 // ------------------------------------------------------------
 static void printBanner(const char *root, const char *ip, int port, int sudoMode)
 {
@@ -125,8 +105,7 @@ static void printBanner(const char *root, const char *ip, int port, int sudoMode
 }
 
 // ------------------------------------------------------------
-// Poseban proces koji sluša stdin u server terminalu:
-// kad korisnik upiše "exit", traži globalni shutdown servera
+// Proces koji sluša STDIN server terminala
 // ------------------------------------------------------------
 static void runConsoleWatcher(pid_t parentPid)
 {
@@ -136,13 +115,12 @@ static void runConsoleWatcher(pid_t parentPid)
     fflush(stdout);
 
     while (fgets(line, sizeof(line), stdin) != NULL) {
-        // ukloni newline
         size_t len = strlen(line);
         if (len > 0 && line[len - 1] == '\n')
             line[len - 1] = '\0';
 
         if (strcmp(line, "exit") == 0) {
-            printf("[CONSOLE] Shutdown requested. Stopping server...\n");
+            printf("[CONSOLE] Shutdown requested...\n");
             fflush(stdout);
             kill(parentPid, SIGTERM);
             break;
@@ -157,62 +135,49 @@ static void runConsoleWatcher(pid_t parentPid)
 // ------------------------------------------------------------
 int main(int argc, char *argv[])
 {
-    // ----------------------------------------------------
-    // OVDJE JE IZMJENA KOJU SI TRAŽIO:
-    // 1. rootDir više NEMA default
-    // 2. rootDir je OBAVEZAN argument
-    // 3. IP/port ostaju defaultni kao u PDF-u
-    // ----------------------------------------------------
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <root_directory> [IP] [port]\n", argv[0]);
+    // =====================================================
+    // PDF ZAHTJEV: 
+    // Server se pokreće SAMO kao:
+    //      ./server <root_directory>
+    //
+    // IP i port su default:
+    //      127.0.0.1 , 8080
+    // =====================================================
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <root_directory>\n", argv[0]);
         return 1;
     }
 
     const char *rootDir = argv[1];
-    const char *ip      = (argc >= 3 ? argv[2] : "127.0.0.1");
-    int         port    = (argc >= 4 ? validatePort(argv[3]) : 8080);
+    const char *ip      = "127.0.0.1";
+    int         port    = 8080;
 
-    if (argc >= 4 && port < 0) {
-        fprintf(stderr, "ERROR: Invalid port '%s'. Must be 1–65535.\n", argv[3]);
-        return 1;
-    }
-    // ----------------------------------------------------
-    // KRAJ MODIFIKOVANOG DIJELA — SVE OSTALO OSTAVLJENO
-    // ----------------------------------------------------
-
-    // Sigurnosna provjera da ne startaš server na /, /etc, ...
+    // Sigurnosna provjera
     if (isDangerousRoot(rootDir)) {
         fprintf(stderr,
-                "ERROR: Root directory '%s' is a critical system path.\n"
-                "Refusing to start for safety reasons.\n",
+                "ERROR: Root directory '%s' is a critical system path.\n",
                 rootDir);
         return 1;
     }
 
-    // ---------------------------
-    // Kontrola privilegija (sudo / bez sudo)
-    // ---------------------------
+    // Privilegije (sudo ili ne)
     uid_t ruid = getuid();
     uid_t euid = geteuid();
-
     int sudoMode = 0;
 
     if (euid == 0 && ruid != 0) {
         sudoMode = 1;
-        printf("[SECURITY] Server started with sudo (ruid=%d, euid=0).\n", (int)ruid);
-        printf("[SECURITY] Dropping privileges to uid=%d for normal operations.\n", (int)ruid);
+        printf("[SECURITY] Running with sudo (ruid=%d). Dropping privileges.\n", (int)ruid);
 
         if (seteuid(ruid) != 0) {
             perror("seteuid drop");
-            fprintf(stderr, "FATAL: Could not drop root privileges.\n");
             return 1;
         }
     } else if (euid == 0 && ruid == 0) {
         sudoMode = 1;
     } else {
         sudoMode = 0;
-        printf("[SECURITY] Server running as normal user (uid=%d).\n", (int)ruid);
-        printf("           System-level adduser/userdel will be disabled.\n");
+        printf("[SECURITY] Running as normal user – usermgmt disabled.\n");
     }
 
     gRootDir = rootDir;
@@ -221,9 +186,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // ---------------------------
     // Signal handler-i
-    // ---------------------------
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handleChildSignal;
@@ -240,6 +203,7 @@ int main(int argc, char *argv[])
     saInt.sa_handler = handleShutdownSignal;
     sigaction(SIGINT, &saInt, NULL);
 
+    // Kreiraj server socket
     int serverFd = createServerSocket(ip, port);
     if (serverFd < 0) {
         fprintf(stderr, "FATAL: Could not bind to %s:%d\n", ip, port);
@@ -248,11 +212,13 @@ int main(int argc, char *argv[])
 
     printBanner(rootDir, ip, port, sudoMode);
 
+    // Console watcher proces
     pid_t consolePid = fork();
     if (consolePid == 0) {
         runConsoleWatcher(getppid());
     }
 
+    // Accept loop
     while (!shutdownRequested) {
         int clientFd = acceptClient(serverFd);
 
@@ -268,6 +234,7 @@ int main(int argc, char *argv[])
         }
 
         pid_t pid = fork();
+
         if (pid == 0) {
             close(serverFd);
 
