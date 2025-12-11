@@ -1,9 +1,12 @@
+// src/client/clientMain.c
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <poll.h>       // <-- OVO JE NOVO
-#include <sys/socket.h>   // <-- OVO DODAJ
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
 
 #include "../../include/network.h"
 #include "../../include/utils.h"
@@ -11,35 +14,29 @@
 
 #define INPUT_SIZE 512
 
-void printHelp()
-{
-    printf("\n==== Available Commands ====\n");
-    printf("login <username>\n");
-    printf("create_user <username> <permissions>\n");
-    printf("delete_user <username>\n");
-    printf("cd <directory>\n");
-    printf("list [directory]\n");
-    printf("create <path> <permissions> [-d]\n");
-    printf("chmod <path> <permissions>\n");
-    printf("move <src> <dst>\n");
-    printf("delete <path>\n");
-    printf("read [-offset=N] <path>\n");
-    printf("write [-offset=N] <path>\n");
-    printf("upload <local> <remote>\n");
-    printf("download <remote> <local>\n");
-    printf("exit\n");
-    printf("============================\n\n");
-}
-
 int main(int argc, char *argv[])
 {
-    if (argc < 3) {
-        printf("Usage: %s <IP> <port>\n", argv[0]);
+    // -----------------------------------
+    // DEFAULT IP + PORT
+    // -----------------------------------
+    const char *ip;
+    int port;
+
+    if (argc == 1) {
+        ip = "127.0.0.1";
+        port = 8080;
+        printf("[INFO] Using default server %s:%d\n", ip, port);
+    }
+    else if (argc == 3) {
+        ip   = argv[1];
+        port = atoi(argv[2]);
+    }
+    else {
+        printf("Usage:\n");
+        printf("  %s                (default 127.0.0.1 8080)\n", argv[0]);
+        printf("  %s <IP> <port>\n", argv[0]);
         return 1;
     }
-
-    const char *ip = argv[1];
-    int port = atoi(argv[2]);
 
     setGlobalServerInfo(ip, port);
 
@@ -49,56 +46,35 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    printf("Connected to server %s:%d\n", ip, port);
-    printf("Type 'help' for commands.\n");
+    printf("Connected to %s:%d\n", ip, port);
 
     char input[INPUT_SIZE];
-
-    struct pollfd fds[2];
-    fds[0].fd = STDIN_FILENO;   // keyboard
-    fds[0].events = POLLIN;
-
-    fds[1].fd = sock;           // server socket
-    fds[1].events = POLLIN;
+    struct pollfd fds[2] = {
+        { STDIN_FILENO, POLLIN, 0 },
+        { sock,          POLLIN, 0 },
+    };
 
     while (1) {
+        // Background cleanup
+        int status;
+        pid_t p;
+        while ((p = waitpid(-1, &status, WNOHANG)) > 0)
+            unregisterBackgroundProcess(p);
 
         printf("> ");
         fflush(stdout);
 
-        int ret = poll(fds, 2, -1);   // blokira dok se bilo šta ne desi
+        if (poll(fds, 2, -1) < 0) break;
 
-        if (ret < 0) {
-            perror("poll");
+        // Server died
+        if (fds[1].revents & (POLLHUP | POLLERR)) {
+            printf("\n[INFO] Server closed.\n");
             break;
         }
 
-        // ---------------------------------------------
-        // CASE 1: Server se ugasio → socket zatvoren
-        // ---------------------------------------------
-        if (fds[1].revents & POLLHUP || fds[1].revents & POLLERR) {
-            printf("\n[INFO] Server has shut down. Closing client...\n");
-            break;
-        }
-
-        // ---------------------------------------------
-        // CASE 2: Server poslao nešto (ne bi trebao osim odgovora)
-        // Ako recv vrati 0 → server mrtav
-        // ---------------------------------------------
-        if (fds[1].revents & POLLIN) {
-            char buf[1];
-            int r = recv(sock, buf, 1, MSG_PEEK);
-            if (r <= 0) {
-                printf("\n[INFO] Lost connection to server. Closing client...\n");
-                break;
-            }
-        }
-
-        // ---------------------------------------------
-        // CASE 3: User je nešto otkucao na tastaturi
-        // ---------------------------------------------
+        // Input
         if (fds[0].revents & POLLIN) {
-            if (!fgets(input, INPUT_SIZE, stdin))
+            if (!fgets(input, sizeof(input), stdin))
                 break;
 
             removeNewline(input);
@@ -108,15 +84,19 @@ int main(int argc, char *argv[])
                 continue;
             }
 
-            int exitFlag = clientHandleInput(sock, input);
-
-            if (exitFlag == 1)
+            if (clientHandleInput(sock, input) == 1)
                 break;
-
-            continue;
         }
     }
 
     close(sock);
     return 0;
+}
+
+void printHelp() {
+    printf("\nCommands:\n");
+    printf(" login <user>\n create_user <u> <perm>\n delete_user <u>\n");
+    printf(" cd <dir>\n list [dir]\n create <p> <perm> [-d]\n chmod <p> <perm>\n");
+    printf(" move <s> <d>\n delete <p>\n read [-offset=N] <p>\n write [-offset=N] <p>\n");
+    printf(" upload <local> <remote>\n download <remote> <local>\n exit\n\n");
 }
