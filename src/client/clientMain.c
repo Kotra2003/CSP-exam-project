@@ -14,9 +14,17 @@
 
 #define INPUT_SIZE 512
 
+// Boje za UI
+#define RESET   "\033[0m"
+#define RED     "\033[31m"
+#define GREEN   "\033[32m"
+#define YELLOW  "\033[33m"
+#define BLUE    "\033[34m"
+#define CYAN    "\033[36m"
+
 // EXTERN deklaracije
 extern const char* getCurrentPath();
-extern const char* getUsername();  // DODAJ
+extern const char* getUsername();
 extern void unregisterBackgroundProcess(pid_t pid);
 
 // ============================================
@@ -29,13 +37,12 @@ static void handleChildSignal(int sig)
     int status;
     
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        printf("[Background] Process %d finished\n", pid);
         unregisterBackgroundProcess(pid);
     }
 }
 
 // ============================================
-// PRINT PROMPT (lijep format)
+// PRINT PROMPT (sa bojama)
 // ============================================
 static void printPrompt(void)
 {
@@ -44,35 +51,50 @@ static void printPrompt(void)
     
     if (username[0] == '\0') {
         // Nije logovan - guest mode
-        printf("guest@127.0.0.1:%s$ ", path);
+        printf(RED "guest" RESET "@" BLUE "127.0.0.1" RESET ":" GREEN "%s" RESET "$ ", path);
     } else {
         // Logovan korisnik
-        printf("%s@127.0.0.1:%s$ ", username, path);
+        printf(GREEN "%s" RESET "@" BLUE "127.0.0.1" RESET ":" CYAN "%s" RESET "$ ", username, path);
     }
     
     fflush(stdout);
 }
 
-void printHelp()
+// ============================================
+// PRINT CLIENT INFO
+// ============================================
+static void printClientInfo(const char *ip, int port)
 {
-    printf("\n==== Available Commands ====\n");
-    printf("login <username>\n");
-    printf("create_user <username> <permissions>\n");
-    printf("delete_user <username>\n");
-    printf("cd <directory>\n");
-    printf("list [directory]\n");
-    printf("create <path> <permissions> [-d]\n");
-    printf("chmod <path> <permissions>\n");
-    printf("move <src> <dst>\n");
-    printf("delete <path>\n");
-    printf("read [-offset=N] <path>\n");
-    printf("write [-offset=N] <path>\n");
-    printf("upload <local> <remote>\n");
-    printf("download <remote> <local>\n");
-    printf("exit\n");
-    printf("============================\n\n");
+    printf("\n" CYAN "============================================================\n");
+    printf("                   FILE SERVER CLIENT\n");
+    printf("------------------------------------------------------------\n" RESET);
+    printf("Server: %s:%d\n", ip, port);
+    printf(CYAN "============================================================\n\n" RESET);
 }
 
+void printHelp()
+{
+    printf("\n" YELLOW "COMMANDS:\n" RESET);
+    printf("  " GREEN "login" RESET " " CYAN "<username>" RESET "                      - Login to server\n");
+    printf("  " GREEN "create_user" RESET " " CYAN "<user> <perm>" RESET "             - " YELLOW "Create user (admin only)" RESET "\n");
+    printf("  " GREEN "delete_user" RESET " " CYAN "<username>" RESET "                - " YELLOW "Delete user (admin only)" RESET "\n");
+    printf("  " GREEN "cd" RESET " " CYAN "<directory>" RESET "                        - Change directory\n");
+    printf("  " GREEN "list" RESET " " CYAN "[path]" RESET "                           - List directory\n");
+    printf("  " GREEN "create" RESET " " CYAN "<path> <perm>" RESET " " YELLOW "[-d]" RESET "             - Create file/directory " YELLOW "(with -d)" RESET "\n");
+    printf("  " GREEN "chmod" RESET " " CYAN "<path> <permissions>" RESET "            - Change permissions\n");
+    printf("  " GREEN "move" RESET " " CYAN "<src> <dst>" RESET "                      - Move/rename\n");
+    printf("  " GREEN "delete" RESET " " CYAN "<path>" RESET "                         - Delete\n");
+    printf("  " GREEN "read" RESET " " YELLOW "[-offset=N]" RESET " " CYAN "<path>" RESET "               - Read file " YELLOW "(with offset)" RESET "\n");
+    printf("  " GREEN "write" RESET " " YELLOW "[-offset=N]" RESET " " CYAN "<path>" RESET "              - Write to file " YELLOW "(with offset)" RESET "\n");
+    printf("  " GREEN "upload" RESET " " YELLOW "[-b]" RESET " " CYAN "<local> <remote>" RESET "          - Upload\n");
+    printf("  " GREEN "download" RESET " " YELLOW "[-b]" RESET " " CYAN "<remote> <local>" RESET "        - Download\n");
+    printf("  " GREEN "exit" RESET "                                  - Exit client\n");
+    printf("  " GREEN "help" RESET "                                  - Show this help\n\n");
+}
+
+// ============================================
+// MAIN
+// ============================================
 int main(int argc, char *argv[])
 {
     // ================================
@@ -99,12 +121,13 @@ int main(int argc, char *argv[])
 
     int sock = connectToServer(ip, port);
     if (sock < 0) {
-        printf("Could not connect to server.\n");
+        printf(RED "Could not connect to server.\n" RESET);
         return 1;
     }
 
-    printf("Connected to server %s:%d\n", ip, port);
-    printf("Type 'help' for commands.\n\n");
+    printClientInfo(ip, port);
+    printf("Connected to " GREEN "%s:%d" RESET "\n", ip, port);
+    printf("Type " YELLOW "'help'" RESET " for commands\n\n");
 
     char input[INPUT_SIZE];
 
@@ -127,7 +150,7 @@ int main(int argc, char *argv[])
 
         // Server se ugasio
         if (fds[1].revents & (POLLHUP | POLLERR)) {
-            printf("\n[INFO] Server has shut down. Closing client...\n");
+            printf(RED "\nServer disconnected\n" RESET);
             break;
         }
 
@@ -136,7 +159,7 @@ int main(int argc, char *argv[])
             char buf[1];
             int r = recv(sock, buf, 1, MSG_PEEK);
             if (r <= 0) {
-                printf("\n[INFO] Lost connection to server. Closing client...\n");
+                printf(RED "\nLost connection to server\n" RESET);
                 break;
             }
         }

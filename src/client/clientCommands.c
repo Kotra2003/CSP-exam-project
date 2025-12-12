@@ -11,22 +11,32 @@
 #include "../../include/utils.h"
 
 // ============================================================================
+// Boje za UI
+// ============================================================================
+#define RESET   "\033[0m"
+#define RED     "\033[31m"
+#define GREEN   "\033[32m"
+#define YELLOW  "\033[33m"
+#define BLUE    "\033[34m"
+#define CYAN    "\033[36m"
+
+#define ERROR(fmt, ...)   printf(RED "✗ " fmt RESET "\n", ##__VA_ARGS__)
+#define SUCCESS(fmt, ...) printf(GREEN "✓ " fmt RESET "\n", ##__VA_ARGS__)
+
+// ============================================================================
 // External upload/download from networkClient.c
 // ============================================================================
 extern int uploadFile(int sock, const char *localPath, const char *remotePath);
 extern int downloadFile(int sock, const char *remotePath, const char *localPath);
 
 // ============================================================================
-// Globals for background processes and current path
+// Globals
 // ============================================================================
 static const char *g_ip = NULL;
 static int g_port = 0;
-static char g_username[64] = "";      // store current logged user
+static char g_username[64] = "";
 static char g_currentPath[PATH_SIZE] = "/";
 
-// ---------------------------------------------------------------------------
-// Background process table
-// ---------------------------------------------------------------------------
 static pid_t bgPids[128];
 static int bgCount = 0;
 
@@ -110,7 +120,7 @@ static int sendSimpleCommand(int sock, int cmd, const char *arg1, const char *ar
 
     ProtocolResponse res;
     if (receiveResponse(sock, &res) < 0) {
-        printf("[ERROR] No response from server\n");
+        ERROR("No response from server");
         return -1;
     }
 
@@ -134,28 +144,25 @@ static int backgroundLogin(int bgSock)
 
     ProtocolResponse lr;
     if (receiveResponse(bgSock, &lr) < 0 || lr.status != STATUS_OK) {
-        printf("[BG] Login failed for user '%s'\n", g_username);
         return -1;
     }
 
     return 0;
 }
 
-// ============================================================================
 // BACKGROUND UPLOAD
-// ============================================================================
 static void startBackgroundUpload(const char *local, const char *remote)
 {
     pid_t pid = fork();
     if (pid < 0) {
-        printf("[ERROR] Cannot fork background upload\n");
+        ERROR("Cannot fork background upload");
         return;
     }
 
     if (pid > 0) {
         registerBackgroundProcess(pid);
-        printf("[Background] Upload started (PID=%d)\n", pid);
-        fflush(stdout);
+        printf(YELLOW "[BG] Upload started (PID=%d): %s -> %s\n" RESET, pid, local, remote);
+        printf(YELLOW "[BG] Running in background (sleep 5s for demo)...\n" RESET);
         return;
     }
 
@@ -164,9 +171,12 @@ static void startBackgroundUpload(const char *local, const char *remote)
     signal(SIGINT, SIG_IGN);
     signal(SIGTERM, SIG_IGN);
 
+    // DEMO: Sleep da se vidi da je background
+    printf(YELLOW "[BG PID=%d] Starting upload in 5 seconds...\n" RESET, getpid());
+    sleep(5);
+
     int bgSock = connectToServer(g_ip, g_port);
     if (bgSock < 0) {
-        printf("[BG UPLOAD] Failed to connect\n");
         _exit(1);
     }
 
@@ -175,37 +185,34 @@ static void startBackgroundUpload(const char *local, const char *remote)
         _exit(1);
     }
 
-    printf("[BG UPLOAD] Started PID=%d: %s -> %s\n", getpid(), local, remote);
-    sleep(5);
-
+    printf(YELLOW "[BG PID=%d] Uploading %s -> %s...\n" RESET, getpid(), local, remote);
+    
     int result = uploadFile(bgSock, local, remote);
     close(bgSock);
 
     if (result == 0) {
-        printf("[Background] Command: upload %s %s concluded\n", remote, local);
+        printf(YELLOW "[Background] Command: upload %s %s concluded\n" RESET, remote, local);
     } else {
-        printf("[Background] Command: upload %s %s FAILED\n", remote, local);
+        printf(YELLOW "[Background] Command: upload %s %s FAILED\n" RESET, remote, local);
     }
 
     fflush(stdout);
     _exit(0);
 }
 
-// ============================================================================
 // BACKGROUND DOWNLOAD
-// ============================================================================
 static void startBackgroundDownload(const char *remote, const char *local)
 {
     pid_t pid = fork();
     if (pid < 0) {
-        printf("[ERROR] Cannot fork background download\n");
+        ERROR("Cannot fork background download");
         return;
     }
 
     if (pid > 0) {
         registerBackgroundProcess(pid);
-        printf("[Background] Download started (PID=%d)\n", pid);
-        fflush(stdout);
+        printf(YELLOW "[BG] Download started (PID=%d): %s -> %s\n" RESET, pid, remote, local);
+        printf(YELLOW "[BG] Running in background (sleep 5s for demo)...\n" RESET);
         return;
     }
 
@@ -214,9 +221,12 @@ static void startBackgroundDownload(const char *remote, const char *local)
     signal(SIGINT, SIG_IGN);
     signal(SIGTERM, SIG_IGN);
 
+    // DEMO: Sleep da se vidi da je background
+    printf(YELLOW "[BG PID=%d] Starting download in 5 seconds...\n" RESET, getpid());
+    sleep(5);
+
     int bgSock = connectToServer(g_ip, g_port);
     if (bgSock < 0) {
-        printf("[BG DOWNLOAD] Failed to connect\n");
         _exit(1);
     }
 
@@ -225,16 +235,15 @@ static void startBackgroundDownload(const char *remote, const char *local)
         _exit(1);
     }
 
-    printf("[BG DOWNLOAD] Started PID=%d: %s -> %s\n", getpid(), remote, local);
-    sleep(5);
-
+    printf(YELLOW "[BG PID=%d] Downloading %s -> %s...\n" RESET, getpid(), remote, local);
+    
     int result = downloadFile(bgSock, remote, local);
     close(bgSock);
 
     if (result == 0) {
-        printf("[Background] Command: download %s %s concluded\n", remote, local);
+        printf(YELLOW "[Background] Command: download %s %s concluded\n" RESET, remote, local);
     } else {
-        printf("[Background] Command: download %s %s FAILED\n", remote, local);
+        printf(YELLOW "[Background] Command: download %s %s FAILED\n" RESET, remote, local);
     }
 
     fflush(stdout);
@@ -255,15 +264,18 @@ int clientHandleInput(int sock, char *input)
     // -----------------------------------------------------------
     // LOGIN
     if (strcmp(cmd, "login") == 0) {
-        if (n < 2) { printf("Usage: login <username>\n"); return 0; }
+        if (n < 2) { 
+            ERROR("Usage: login <username>"); 
+            return 0; 
+        }
 
         if (sendSimpleCommand(sock, CMD_LOGIN, tokens[1], NULL, NULL) >= 0) {
-            printf("Logged in as %s\n", tokens[1]);
+            SUCCESS("Logged in as %s", tokens[1]);
             strncpy(g_username, tokens[1], sizeof(g_username));
-            strcpy(g_currentPath, "/");  // Reset putanje
+            strcpy(g_currentPath, "/");
         }
         else {
-            printf("[ERROR] login failed\n");
+            ERROR("Login failed");
         }
         return 0;
     }
@@ -271,29 +283,42 @@ int clientHandleInput(int sock, char *input)
     // -----------------------------------------------------------
     // CREATE USER
     if (strcmp(cmd, "create_user") == 0) {
-        if (n < 3) { printf("Usage: create_user <username> <permissions>\n"); return 0; }
+        if (n < 3) { 
+            ERROR("Usage: create_user <username> <permissions>"); 
+            return 0; 
+        }
+        
         if (sendSimpleCommand(sock, CMD_CREATE_USER, tokens[1], tokens[2], NULL) >= 0)
-            printf("User created.\n");
+            SUCCESS("User %s created", tokens[1]);
         else
-            printf("[ERROR] create_user failed\n");
+            ERROR("Failed to create user");
+        
         return 0;
     }
 
     // -----------------------------------------------------------
     // DELETE USER
     if (strcmp(cmd, "delete_user") == 0) {
-        if (n < 2) { printf("Usage: delete_user <username>\n"); return 0; }
+        if (n < 2) { 
+            ERROR("Usage: delete_user <username>"); 
+            return 0; 
+        }
+        
         if (sendSimpleCommand(sock, CMD_DELETE_USER, tokens[1], NULL, NULL) >= 0)
-            printf("User deleted.\n");
+            SUCCESS("User %s deleted", tokens[1]);
         else
-            printf("[ERROR] delete_user failed\n");
+            ERROR("Failed to delete user");
+        
         return 0;
     }
 
     // -----------------------------------------------------------
-    // CD (sa primanjem nove putanje od servera)
+    // CD
     if (strcmp(cmd, "cd") == 0) {
-        if (n < 2) { printf("Usage: cd <directory>\n"); return 0; }
+        if (n < 2) { 
+            ERROR("Usage: cd <directory>"); 
+            return 0; 
+        }
         
         ProtocolMessage msg;
         memset(&msg, 0, sizeof(msg));
@@ -304,16 +329,15 @@ int clientHandleInput(int sock, char *input)
         
         ProtocolResponse res;
         if (receiveResponse(sock, &res) < 0) {
-            printf("[ERROR] No response from server\n");
+            ERROR("No response from server");
             return 0;
         }
         
         if (res.status != STATUS_OK) {
-            printf("[ERROR] cd failed\n");
+            ERROR("Cannot change to '%s'", tokens[1]);
             return 0;
         }
         
-        // Server šalje novu putanju
         if (res.dataSize > 0) {
             char newPath[PATH_SIZE];
             if (res.dataSize < PATH_SIZE) {
@@ -333,7 +357,7 @@ int clientHandleInput(int sock, char *input)
         int dataSize = sendSimpleCommand(sock, CMD_LIST, path, NULL, NULL);
 
         if (dataSize < 0) {
-            printf("[ERROR] list failed\n");
+            ERROR("Failed to list directory");
             return 0;
         }
 
@@ -343,6 +367,7 @@ int clientHandleInput(int sock, char *input)
 
         printf("%s", buffer);
         free(buffer);
+        
         return 0;
     }
 
@@ -350,7 +375,7 @@ int clientHandleInput(int sock, char *input)
     // CREATE
     if (strcmp(cmd, "create") == 0) {
         if (n < 3 || n > 4) {
-            printf("Usage: create <path> <permissions> [-d]\n");
+            ERROR("Usage: create <path> <permissions> [-d]");
             return 0;
         }
 
@@ -359,12 +384,14 @@ int clientHandleInput(int sock, char *input)
         const char *flag = (n == 4 ? tokens[3] : "");
 
         if (n == 4 && strcmp(flag, "-d") != 0) {
-            printf("Usage: create <path> <permissions> [-d]\n");
+            ERROR("Usage: create <path> <permissions> [-d]");
             return 0;
         }
 
         if (sendSimpleCommand(sock, CMD_CREATE, path, perm, flag) < 0)
-            printf("[ERROR] create failed\n");
+            ERROR("Create failed");
+        else
+            SUCCESS("Created");
 
         return 0;
     }
@@ -372,27 +399,48 @@ int clientHandleInput(int sock, char *input)
     // -----------------------------------------------------------
     // CHMOD
     if (strcmp(cmd, "chmod") == 0) {
-        if (n < 3) { printf("Usage: chmod <path> <permissions>\n"); return 0; }
+        if (n < 3) { 
+            ERROR("Usage: chmod <path> <permissions>"); 
+            return 0; 
+        }
+        
         if (sendSimpleCommand(sock, CMD_CHMOD, tokens[1], tokens[2], NULL) < 0)
-            printf("[ERROR] chmod failed\n");
+            ERROR("Failed to change permissions");
+        else
+            SUCCESS("Permissions changed");
+        
         return 0;
     }
 
     // -----------------------------------------------------------
     // MOVE
     if (strcmp(cmd, "move") == 0) {
-        if (n < 3) { printf("Usage: move <src> <dst>\n"); return 0; }
+        if (n < 3) { 
+            ERROR("Usage: move <src> <dst>"); 
+            return 0; 
+        }
+        
         if (sendSimpleCommand(sock, CMD_MOVE, tokens[1], tokens[2], NULL) < 0)
-            printf("[ERROR] move failed\n");
+            ERROR("Failed to move");
+        else
+            SUCCESS("Moved");
+        
         return 0;
     }
 
     // -----------------------------------------------------------
     // DELETE
     if (strcmp(cmd, "delete") == 0) {
-        if (n < 2) { printf("Usage: delete <path>\n"); return 0; }
+        if (n < 2) { 
+            ERROR("Usage: delete <path>"); 
+            return 0; 
+        }
+        
         if (sendSimpleCommand(sock, CMD_DELETE, tokens[1], NULL, NULL) < 0)
-            printf("[ERROR] delete failed\n");
+            ERROR("Failed to delete");
+        else
+            SUCCESS("Deleted");
+        
         return 0;
     }
 
@@ -411,7 +459,7 @@ int clientHandleInput(int sock, char *input)
             strncpy(msg.arg2, tokens[1] + 8, ARG_SIZE);
         }
         else {
-            printf("Usage: read <path>\n       read -offset=N <path>\n");
+            ERROR("Usage: read <path> OR read -offset=N <path>");
             return 0;
         }
 
@@ -419,7 +467,7 @@ int clientHandleInput(int sock, char *input)
 
         ProtocolResponse res;
         if (receiveResponse(sock, &res) < 0 || res.status != STATUS_OK) {
-            printf("[ERROR] read failed\n");
+            ERROR("Failed to read file");
             return 0;
         }
 
@@ -430,6 +478,7 @@ int clientHandleInput(int sock, char *input)
 
         printf("%s\n", buffer);
         free(buffer);
+        
         return 0;
     }
 
@@ -448,7 +497,7 @@ int clientHandleInput(int sock, char *input)
             strncpy(msg.arg2, tokens[1] + 8, ARG_SIZE);
         }
         else {
-            printf("Usage: write <path>\n       write -offset=N <path>\n");
+            ERROR("Usage: write <path> OR write -offset=N <path>");
             return 0;
         }
 
@@ -456,10 +505,12 @@ int clientHandleInput(int sock, char *input)
 
         ProtocolResponse ack;
         if (receiveResponse(sock, &ack) < 0 || ack.status != STATUS_OK) {
-            printf("[ERROR] write rejected\n");
+            ERROR("Write rejected");
             return 0;
         }
 
+        printf("Enter text (press ENTER then Ctrl+D):\n");
+        
         char tmp[4096];
         char *buffer = NULL;
         int total = 0, cap = 0, r;
@@ -476,6 +527,11 @@ int clientHandleInput(int sock, char *input)
             total += r;
         }
 
+        // UKLONI NEWLINE SA KRAJA AKO POSTOJI
+        if (total > 0 && buffer[total - 1] == '\n') {
+            total--;  // Ukloni newline
+        }
+
         int size = total;
         sendAll(sock, &size, sizeof(int));
         if (size > 0)
@@ -487,15 +543,15 @@ int clientHandleInput(int sock, char *input)
         receiveResponse(sock, &fin);
 
         if (fin.status == STATUS_OK)
-            printf("[OK] Wrote %d bytes\n", fin.dataSize);
+            SUCCESS("Wrote %d bytes", fin.dataSize);
         else
-            printf("[ERROR] write failed\n");
+            ERROR("Write failed");
 
         return 0;
     }
 
     // -----------------------------------------------------------
-    // UPLOAD
+    // UPLOAD (foreground)
     if (strcmp(cmd, "upload") == 0) {
         if (n == 4 && strcmp(tokens[1], "-b") == 0) {
             startBackgroundUpload(tokens[2], tokens[3]);
@@ -504,16 +560,18 @@ int clientHandleInput(int sock, char *input)
 
         if (n == 3) {
             if (uploadFile(sock, tokens[1], tokens[2]) < 0)
-                printf("[ERROR] upload failed\n");
+                ERROR("Upload failed: %s -> %s", tokens[1], tokens[2]);
+            else
+                SUCCESS("Upload completed: %s -> %s", tokens[1], tokens[2]);
             return 0;
         }
 
-        printf("Usage:\n upload <local> <remote>\n upload -b <local> <remote>\n");
+        ERROR("Usage: upload <local> <remote> OR upload -b <local> <remote>");
         return 0;
     }
 
     // -----------------------------------------------------------
-    // DOWNLOAD
+    // DOWNLOAD (foreground)
     if (strcmp(cmd, "download") == 0) {
         if (n == 4 && strcmp(tokens[1], "-b") == 0) {
             startBackgroundDownload(tokens[2], tokens[3]);
@@ -522,33 +580,29 @@ int clientHandleInput(int sock, char *input)
 
         if (n == 3) {
             if (downloadFile(sock, tokens[1], tokens[2]) < 0)
-                printf("[ERROR] download failed\n");
+                ERROR("Download failed: %s -> %s", tokens[1], tokens[2]);
+            else
+                SUCCESS("Download completed: %s -> %s", tokens[1], tokens[2]);
             return 0;
         }
 
-        printf("Usage:\n download <remote> <local>\n download -b <remote> <local>\n");
+        ERROR("Usage: download <remote> <local> OR download -b <remote> <local>");
         return 0;
     }
 
     // -----------------------------------------------------------
-    // EXIT (BLOKIRAN DOK IMA BG PROCESA, ali Ctrl+C radi)
-    // -----------------------------------------------------------
+    // EXIT
     if (strcmp(cmd, "exit") == 0) {
         if (hasActiveBackgroundProcesses()) {
-            printf("\n[ERROR] Cannot exit: %d background transfer(s) still running:\n", bgCount);
-            
-            for (int i = 0; i < bgCount; i++) {
-                printf("  - PID %d\n", bgPids[i]);
-            }
-            
-            printf("\nWait for them to finish or use Ctrl+C to force exit.\n");
-            return 0;  // BLOKIRAJ exit komandu
+            ERROR("Cannot exit: %d background transfer(s) still running", bgCount);
+            printf("Wait for them to finish or use Ctrl+C\n");
+            return 0;
         }
 
         sendSimpleCommand(sock, CMD_EXIT, NULL, NULL, NULL);
         return 1;
     }
 
-    printf("Unknown command: %s\n", cmd);
+    ERROR("Unknown command: %s", cmd);
     return 0;
 }

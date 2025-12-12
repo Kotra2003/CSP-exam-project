@@ -207,38 +207,52 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
 int fsWriteFile(const char *path, const char *data, int size, int offset)
 {
     int fd;
-
-    // Kreiraj fajl
-    if (offset == 0)
-        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    else
-        fd = open(path, O_WRONLY | O_CREAT, 0600);
-
+    
+    // UVIJEK otvori bez O_TRUNC da ne obrišemo postojeći sadržaj
+    // O_TRUNC bi obrisao ceo fajl kada offset=0!
+    fd = open(path, O_WRONLY | O_CREAT, 0600);
+    
     if (fd < 0) return -1;
 
-    // Postavi tačne permisije (700)
+    // Postavi permisije na 700
     if (fchmod(fd, 0700) < 0) {
         close(fd);
         return -1;
     }
 
-    if (lockFileWrite(fd) < 0)
-    {
+    if (lockFileWrite(fd) < 0) {
+        close(fd);
         close(fd);
         return -1;
     }
 
-    if (lseek(fd, offset, SEEK_SET) < 0)
-    {
+    // Ako je offset = 0, možda želimo da obrišemo postojeći sadržaj
+    // Ovo zavisi od interpretacije - po specifikaciji, write bez offseta
+    // treba da overwrite-uje ceo fajl
+    if (offset == 0) {
+        // Obriši postojeći sadržaj (truncate na 0)
+        if (ftruncate(fd, 0) < 0) {
+            unlockFile(fd);
+            close(fd);
+            return -1;
+        }
+    }
+
+    // Pomjeri se na željeni offset
+    if (lseek(fd, offset, SEEK_SET) < 0) {
         unlockFile(fd);
         close(fd);
         return -1;
     }
 
+    // Zapiši podatke
     int w = write(fd, data, size);
-
+    
+    // Ako je offset + size > trenutna veličina, fajl će se automatski proširiti
+    // write() će proširiti fajl ako pišemo izvan trenutne veličine
+    
     unlockFile(fd);
     close(fd);
-
+    
     return w;
 }

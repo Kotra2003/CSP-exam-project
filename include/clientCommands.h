@@ -12,7 +12,7 @@ int clientDownload(int sock, const char *remotePath, const char *localPath);
 // Globalne funkcije
 void setGlobalServerInfo(const char *ip, int port);
 const char* getCurrentPath();
-const char* getUsername();  // DODAJ
+const char* getUsername();
 void updateCurrentPath(const char *newPath);
 int hasActiveBackgroundProcesses(void);
 

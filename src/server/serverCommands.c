@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <pwd.h>
 #include <grp.h>
+#include <errno.h>
 
 #include "../../include/serverCommands.h"
 #include "../../include/protocol.h"
@@ -542,68 +543,120 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     char output[8192];
     output[0] = '\0';
 
-    // --------------------------------------------------------
-    // 1) Odredi bazni direktorij koji listamo
-    // --------------------------------------------------------
+    // ============================================
+    // 1) Odredi putanju koja se lista
+    // ============================================
     if (msg->arg1[0] == '\0') {
-        // bez argumenata → trenutni dir korisnika
+        // Bez argumenata -> trenutni direktorij
         strncpy(fullPath, session->currentDir, PATH_SIZE);
         fullPath[PATH_SIZE - 1] = '\0';
     }
     else if (msg->arg1[0] == '/') {
-        // ABSOLUTE VIRTUAL PATH:
-        //   /admin      →  <gRootDir>/admin
-        //   /jana/docs  →  <gRootDir>/jana/docs
+        // Apsolutna putanja unutar root-a
+        // Primjer: /admin -> <rootDir>/admin
+        //          /admin/docs -> <rootDir>/admin/docs
         snprintf(fullPath, PATH_SIZE, "%s/%s", gRootDir, msg->arg1 + 1);
     }
     else {
-        // Relativna putanja → standardno sandboxovanje preko resolvePath
+        // Relativna putanja -> koristi resolvePath
         if (resolvePath(session, msg->arg1, fullPath) < 0) {
+            printf("[LIST] ERROR: resolvePath failed for '%s'\n", msg->arg1);
             sendErrorMsg(clientFd);
             return 0;
         }
     }
 
-    // Mora ostati unutar globalnog root-a
+    // ============================================
+    // 2) Provjeri da li je putanja unutar root-a
+    // ============================================
     if (!isInsideRoot(gRootDir, fullPath)) {
+        printf("[LIST] ERROR: Path outside root: '%s'\n", fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // --------------------------------------------------------
-    // 2) Otvori direktorij i složi izlaz
-    // --------------------------------------------------------
+    // ============================================
+    // 3) Provjeri da li direktorij postoji
+    // ============================================
+    struct stat st;
+    if (stat(fullPath, &st) < 0) {
+        printf("[LIST] ERROR: stat failed for '%s': %s\n", fullPath, strerror(errno));
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    if (!S_ISDIR(st.st_mode)) {
+        printf("[LIST] ERROR: Not a directory: '%s'\n", fullPath);
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    // ============================================
+    // 4) OTVORI DIREKTORIJ
+    // ============================================
     DIR *dir = opendir(fullPath);
     if (!dir) {
-        perror("opendir");
+        printf("[LIST] ERROR: opendir failed for '%s': %s\n", fullPath, strerror(errno));
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // HEADER
+    strcat(output, "============================================================\n");
+    strcat(output, "                         CONTENTS                          \n");
+    strcat(output, "------------------------------------------------------------\n");
+    strcat(output, " NAME                              PERMISSIONS     SIZE     \n");
+    strcat(output, "------------------------------------------------------------\n");
+
     struct dirent *entry;
+    int itemCount = 0;
+    
     while ((entry = readdir(dir)) != NULL)
     {
+        // Preskoči . i .. i .lock fajlove
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") || strstr(entry->d_name, ".lock") != NULL)
             continue;
 
         char entryPath[PATH_SIZE];
         snprintf(entryPath, PATH_SIZE, "%s/%s", fullPath, entry->d_name);
 
-        struct stat st;
-        if (stat(entryPath, &st) < 0)
+        // Stat fajla/direktorijuma
+        if (stat(entryPath, &st) < 0) {
+            // Ako stat faila, nastavi sa sljedećim
             continue;
+        }
 
         int  perms = st.st_mode & 0777;
         long size  = (long)st.st_size;
+        int  isDir = S_ISDIR(st.st_mode);
 
+        // Formatiraj ispis
         char line[512];
-        snprintf(line, sizeof(line), "%s  %03o  %ld\n",
-                 entry->d_name, perms, size);
+        if (isDir) {
+            snprintf(line, sizeof(line), " %-30s [DIR]  %04o      %6ld\n",
+                     entry->d_name, perms, size);
+        } else {
+            snprintf(line, sizeof(line), " %-30s [FILE] %04o      %6ld\n",
+                     entry->d_name, perms, size);
+        }
 
         strncat(output, line, sizeof(output) - strlen(output) - 1);
+        itemCount++;
     }
 
     closedir(dir);
+
+    // FOOTER
+    strcat(output, "------------------------------------------------------------\n");
+    
+    char footer[128];
+    snprintf(footer, sizeof(footer), " Total: %d item(s)\n", itemCount);
+    strcat(output, footer);
+    
+    strcat(output, "============================================================\n");
+
+    // DEBUG: ispiši šta šaljemo
+    printf("[LIST] OK: Sending %ld bytes for path '%s'\n", strlen(output), fullPath);
 
     sendOk(clientFd, strlen(output));
     if (strlen(output) > 0) {
