@@ -208,12 +208,19 @@ int fsWriteFile(const char *path, const char *data, int size, int offset)
 {
     int fd;
 
+    // Kreiraj fajl
     if (offset == 0)
-        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0700);
+        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     else
-        fd = open(path, O_WRONLY | O_CREAT, 0700);
+        fd = open(path, O_WRONLY | O_CREAT, 0600);
 
     if (fd < 0) return -1;
+
+    // Postavi tačne permisije (700)
+    if (fchmod(fd, 0700) < 0) {
+        close(fd);
+        return -1;
+    }
 
     if (lockFileWrite(fd) < 0)
     {

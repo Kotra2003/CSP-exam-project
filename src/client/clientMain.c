@@ -2,14 +2,56 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <poll.h>       // <-- OVO JE NOVO
-#include <sys/socket.h>   // <-- OVO DODAJ
+#include <poll.h>       
+#include <sys/socket.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 #include "../../include/network.h"
 #include "../../include/utils.h"
 #include "../../include/clientCommands.h"
 
 #define INPUT_SIZE 512
+
+// EXTERN deklaracije
+extern const char* getCurrentPath();
+extern const char* getUsername();  // DODAJ
+extern void unregisterBackgroundProcess(pid_t pid);
+
+// ============================================
+// SIGCHLD HANDLER
+// ============================================
+static void handleChildSignal(int sig)
+{
+    (void)sig;
+    pid_t pid;
+    int status;
+    
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        printf("[Background] Process %d finished\n", pid);
+        unregisterBackgroundProcess(pid);
+    }
+}
+
+// ============================================
+// PRINT PROMPT (lijep format)
+// ============================================
+static void printPrompt(void)
+{
+    const char *username = getUsername();
+    const char *path = getCurrentPath();
+    
+    if (username[0] == '\0') {
+        // Nije logovan - guest mode
+        printf("guest@127.0.0.1:%s$ ", path);
+    } else {
+        // Logovan korisnik
+        printf("%s@127.0.0.1:%s$ ", username, path);
+    }
+    
+    fflush(stdout);
+}
 
 void printHelp()
 {
@@ -34,22 +76,24 @@ void printHelp()
 int main(int argc, char *argv[])
 {
     // ================================
-    // DEFAULTNE VRIJEDNOSTI (DODANO)
+    // POSTAVI SIGNAL HANDLERE
+    // ================================
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handleChildSignal;
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
+    
+    // ================================
+    // DEFAULTNE VRIJEDNOSTI
     // ================================
     const char *ip = "127.0.0.1";
     int port = 8080;
 
-    // KORISNIK JE DAO ARGUMENTE → KORISTI NJIH
     if (argc == 3) {
         ip = argv[1];
         port = atoi(argv[2]);
     }
-    // AKO NIJE DAO → NE PRIKAZUJ EMERGENCY USAGE, SAMO DEFAULT
-    // else ništa — default se već koristi
-
-    // ================================
-    // KRAJ IZMJENE — SVE OSTALO IDENTIČNO
-    // ================================
 
     setGlobalServerInfo(ip, port);
 
@@ -60,41 +104,34 @@ int main(int argc, char *argv[])
     }
 
     printf("Connected to server %s:%d\n", ip, port);
-    printf("Type 'help' for commands.\n");
+    printf("Type 'help' for commands.\n\n");
 
     char input[INPUT_SIZE];
 
     struct pollfd fds[2];
-    fds[0].fd = STDIN_FILENO;   // keyboard
+    fds[0].fd = STDIN_FILENO;
     fds[0].events = POLLIN;
-
-    fds[1].fd = sock;           // server socket
+    fds[1].fd = sock;
     fds[1].events = POLLIN;
 
     while (1) {
+        printPrompt();
 
-        printf("> ");
-        fflush(stdout);
-
-        int ret = poll(fds, 2, -1);   // blokira dok se bilo šta ne desi
+        int ret = poll(fds, 2, -1);
 
         if (ret < 0) {
+            if (errno == EINTR) continue;
             perror("poll");
             break;
         }
 
-        // ---------------------------------------------
-        // CASE 1: Server se ugasio → socket zatvoren
-        // ---------------------------------------------
-        if (fds[1].revents & POLLHUP || fds[1].revents & POLLERR) {
+        // Server se ugasio
+        if (fds[1].revents & (POLLHUP | POLLERR)) {
             printf("\n[INFO] Server has shut down. Closing client...\n");
             break;
         }
 
-        // ---------------------------------------------
-        // CASE 2: Server poslao nešto (ne bi trebao osim odgovora)
-        // Ako recv vrati 0 → server mrtav
-        // ---------------------------------------------
+        // Server poslao nešto
         if (fds[1].revents & POLLIN) {
             char buf[1];
             int r = recv(sock, buf, 1, MSG_PEEK);
@@ -104,9 +141,7 @@ int main(int argc, char *argv[])
             }
         }
 
-        // ---------------------------------------------
-        // CASE 3: User je nešto otkucao na tastaturi
-        // ---------------------------------------------
+        // User input
         if (fds[0].revents & POLLIN) {
             if (!fgets(input, INPUT_SIZE, stdin))
                 break;

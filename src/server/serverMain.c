@@ -135,6 +135,7 @@ static void runConsoleWatcher(pid_t parentPid)
 // ------------------------------------------------------------
 int main(int argc, char *argv[])
 {
+    umask(000);
     // =====================================================
     // PDF ZAHTJEV: 
     // Server se pokreće SAMO kao:

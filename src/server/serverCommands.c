@@ -472,14 +472,22 @@ int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
     char fullPath[PATH_SIZE];
 
     if (msg->arg1[0] == '\0') {
+        // cd bez argumenata - vrati na home
         strncpy(session->currentDir, session->homeDir, PATH_SIZE);
-        sendOk(clientFd, 0);
+        
+        // Vrati putanju za prikaz
+        char displayPath[PATH_SIZE] = "/";
+        sendOk(clientFd, strlen(displayPath));
+        if (strlen(displayPath) > 0) {
+            sendAll(clientFd, displayPath, strlen(displayPath));
+        }
         return 0;
     }
 
+    // Resolve path
     if (resolvePath(session, msg->arg1, fullPath) < 0 ||
         !isInsideRoot(session->homeDir, fullPath)) {
-
+        
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -490,17 +498,39 @@ int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
+    // Update session
     strncpy(session->currentDir, fullPath, PATH_SIZE);
-    sendOk(clientFd, 0);
+    
+    // Calculate display path (relative to home directory)
+    char displayPath[PATH_SIZE];
+    size_t homeLen = strlen(session->homeDir);
+    
+    if (strncmp(session->currentDir, session->homeDir, homeLen) == 0) {
+        if (session->currentDir[homeLen] == '\0') {
+            strcpy(displayPath, "/");
+        } else if (session->currentDir[homeLen] == '/') {
+            snprintf(displayPath, PATH_SIZE, "/%s", session->currentDir + homeLen + 1);
+        } else {
+            strcpy(displayPath, "/");
+        }
+    } else {
+        strcpy(displayPath, "/");
+    }
+    
+    // Send OK with the new display path
+    sendOk(clientFd, strlen(displayPath));
+    if (strlen(displayPath) > 0) {
+        sendAll(clientFd, displayPath, strlen(displayPath));
+    }
+    
+    printf("[CD] OK -> '%s' (display: '%s')\n", fullPath, displayPath);
     return 0;
 }
 
 // ================================================================
 // LIST
 // ================================================================
-// ================================================================
-// LIST
-// ================================================================
+
 int handleList(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("LIST", msg, session);
