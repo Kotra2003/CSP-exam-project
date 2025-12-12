@@ -160,9 +160,8 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("CREATE_USER", msg, session);
 
-    // 1) Osnovne provjere koje ne traže root
+    // Osnovne provjere
     if (msg->arg1[0] == '\0' || msg->arg2[0] == '\0') {
-        printf("[CREATE_USER] ERROR: missing <username> or <permissions>\n");
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -171,7 +170,6 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     int permissions       = (int)strtol(msg->arg2, NULL, 8);
 
     if (permissions <= 0) {
-        printf("[CREATE_USER] ERROR invalid permissions\n");
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -180,91 +178,59 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, username);
 
     if (fileExists(homePath)) {
-        printf("[CREATE_USER] ERROR: '%s' already exists\n", homePath);
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 2) Pokušaj da privremeno postaneš root
+    // Privremeni root
     uid_t old_euid;
     if (elevateToRoot(&old_euid) < 0) {
-        printf("[CREATE_USER] ERROR: server has no root privileges (run with sudo to create system users).\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
     int error = 0;
 
-    // 3) ROOT SEKCIJA: adduser, mkdir, chmod, chown
     do {
-        // 3.1 create system user
+        // 1. Kreiraj korisnika
         pid_t pid = fork();
-        if (pid < 0) {
-            perror("fork");
-            error = 1;
-            break;
-        }
         if (pid == 0) {
-            execlp("adduser", "adduser",
-                   "--disabled-password",
-                   "--gecos", "",
-                   username,
-                   NULL);
-            perror("execlp adduser");
+            execlp("adduser", "adduser", "--disabled-password", "--gecos", "", username, NULL);
             _exit(1);
         }
+        waitpid(pid, NULL, 0);
 
-        int status;
-        if (waitpid(pid, &status, 0) < 0) {
-            perror("waitpid");
-            error = 1;
-            break;
+        // 2. Prebaci u csapgroup
+        pid = fork();
+        if (pid == 0) {
+            execlp("usermod", "usermod", "-g", "csapgroup", username, NULL);
+            _exit(1);
         }
+        waitpid(pid, NULL, 0);
 
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            printf("[CREATE_USER] adduser failed (exit=%d)\n", WEXITSTATUS(status));
-            error = 1;
-            break;
-        }
-
-        // 3.2 create home directory inside gRootDir
+        // 3. Napravi home direktorij
         if (mkdir(homePath, permissions) < 0) {
-            perror("mkdir");
             error = 1;
             break;
         }
 
-        // 3.3 set permissions
-        if (chmod(homePath, permissions) < 0) {
-            perror("chmod");
-            error = 1;
-            break;
-        }
-
-        // 3.4 set owner and group
+        // 4. Postavi vlasnika i grupu
         struct group *grp = getgrnam("csapgroup");
-        if (!grp) {
-            printf("[CREATE_USER] ERROR: group 'csapgroup' not found\n");
-            error = 1;
-            break;
-        }
-
         struct passwd *pwd = getpwnam(username);
-        if (!pwd) {
-            printf("[CREATE_USER] ERROR: passwd entry missing for '%s'\n", username);
+        
+        if (!grp || !pwd) {
             error = 1;
             break;
         }
 
-        if (chown(homePath, pwd->pw_uid, grp->gr_gid) < 0) {
-            perror("chown");
+        if (chown(homePath, pwd->pw_uid, grp->gr_gid) < 0 ||
+            chmod(homePath, permissions) < 0) {
             error = 1;
             break;
         }
 
     } while (0);
 
-    // 4) Obavezno vrati nazad stari EUID (čak i ako je bilo errova)
     dropFromRoot(old_euid);
 
     if (error) {
@@ -272,7 +238,7 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    printf("[CREATE_USER] OK user '%s' perms %o\n", username, permissions);
+    printf("[CREATE_USER] OK '%s'\n", username);
     sendOk(clientFd, 0);
     return 0;
 }
@@ -1020,9 +986,9 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("DELETE_USER", msg, session);
 
-    // 1) Samo admin smije brisati korisnike
-    if (!session->isLoggedIn || strcmp(session->username, "admin") != 0) {
-        printf("[DELETE_USER] ERROR: only 'admin' can delete users\n");
+    // 1) Provjera da li je korisnik logovan (BILO KOJI korisnik)
+    if (session->isLoggedIn) {
+        printf("[DELETE_USER] This command is only used for cleaning and you can't be logged in!\n");
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -1035,14 +1001,7 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 
     const char *target = msg->arg1;
 
-    // 3) Admin ne smije brisati sam sebe
-    if (strcmp(target, "admin") == 0) {
-        printf("[DELETE_USER] ERROR: admin account cannot be deleted\n");
-        sendErrorMsg(clientFd);
-        return 0;
-    }
-
-    // 4) Složimo path do home foldera
+    // 3) Složimo path do home foldera
     char homePath[PATH_SIZE];
     snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, target);
 
@@ -1052,7 +1011,7 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 5) Privremeno digni privilegije na root
+    // 4) Privremeno digni privilegije na root
     uid_t old_euid;
     if (elevateToRoot(&old_euid) < 0) {
         printf("[DELETE_USER] ERROR: server not running with sudo.\n");
@@ -1062,7 +1021,7 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 
     int error = 0;
 
-    // 6) userdel + remove directory
+    // 5) userdel + remove directory
     do {
         // userdel
         pid_t pid = fork();
@@ -1092,7 +1051,7 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 
     } while (0);
 
-    // 7) Vrati privilegije nazad
+    // 6) Vrati privilegije nazad
     dropFromRoot(old_euid);
 
     if (error) {
@@ -1100,7 +1059,7 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    printf("[DELETE_USER] '%s' deleted successfully\n", target);
+    printf("[DELETE_USER] '%s' deleted successfully (by user '%s')\n", target, session->username);
     sendOk(clientFd, 0);
     return 0;
 }

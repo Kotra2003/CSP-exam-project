@@ -76,8 +76,8 @@ void printHelp()
 {
     printf("\n" YELLOW "COMMANDS:\n" RESET);
     printf("  " GREEN "login" RESET " " CYAN "<username>" RESET "                      - Login to server\n");
-    printf("  " GREEN "create_user" RESET " " CYAN "<user> <perm>" RESET "             - " YELLOW "Create user (admin only)" RESET "\n");
-    printf("  " GREEN "delete_user" RESET " " CYAN "<username>" RESET "                - " YELLOW "Delete user (admin only)" RESET "\n");
+    printf("  " GREEN "create_user" RESET " " CYAN "<user> <perm>" RESET "             - " YELLOW "Create user" RESET "\n");
+    printf("  " GREEN "delete_user" RESET " " CYAN "<username>" RESET "                - " RED "Delete user" RESET "\n");
     printf("  " GREEN "cd" RESET " " CYAN "<directory>" RESET "                        - Change directory\n");
     printf("  " GREEN "list" RESET " " CYAN "[path]" RESET "                           - List directory\n");
     printf("  " GREEN "create" RESET " " CYAN "<path> <perm>" RESET " " YELLOW "[-d]" RESET "             - Create file/directory " YELLOW "(with -d)" RESET "\n");
