@@ -104,6 +104,139 @@ int tokenize(char *input, char *tokens[], int maxTokens)
 }
 
 // ============================================================================
+// NEW: User-friendly error explanations (CLIENT SIDE ONLY)
+// (Ne mijenja protokol, ne dira server, samo objasni useru šta je zeznuo)
+// ============================================================================
+static void explainCommandError(const char *cmd,
+                                const char *a1,
+                                const char *a2,
+                                const char *a3)
+{
+    (void)a1;
+    (void)a2;
+    (void)a3;
+
+    if (strcmp(cmd, "login") == 0) {
+        ERROR("Login failed: user does not exist or you are already logged in.");
+        ERROR("Syntax: login <username>");
+        return;
+    }
+
+    if (strcmp(cmd, "create_user") == 0) {
+        ERROR("User creation failed.");
+        ERROR("Possible reasons:");
+        ERROR(" - user already exists");
+        ERROR(" - invalid permissions (must be octal, e.g. 700)");
+        ERROR("Syntax: create_user <username> <permissions>");
+        return;
+    }
+
+    if (strcmp(cmd, "delete_user") == 0) {
+        ERROR("User deletion failed.");
+        ERROR("You must NOT be logged in and the user must exist.");
+        ERROR("Syntax: delete_user <username>");
+        return;
+    }
+
+    if (strcmp(cmd, "cd") == 0) {
+        ERROR("Change directory failed.");
+        ERROR("Possible reasons:");
+        ERROR(" - directory does not exist");
+        ERROR(" - directory is outside your home directory");
+        ERROR("Syntax: cd <directory>");
+        return;
+    }
+
+    if (strcmp(cmd, "list") == 0) {
+        ERROR("List command failed.");
+        ERROR("Possible reasons:");
+        ERROR(" - directory does not exist");
+        ERROR(" - invalid path");
+        ERROR("Syntax: list [path]");
+        return;
+    }
+
+    if (strcmp(cmd, "create") == 0) {
+        ERROR("Create operation failed.");
+        ERROR("Possible reasons:");
+        ERROR(" - file or directory already exists");
+        ERROR(" - invalid permissions (0–777, octal)");
+        ERROR(" - invalid path");
+        ERROR("Syntax: create <path> <permissions> [-d]");
+        return;
+    }
+
+    if (strcmp(cmd, "chmod") == 0) {
+        ERROR("Permission change failed.");
+        ERROR("Possible reasons:");
+        ERROR(" - file does not exist");
+        ERROR(" - invalid permission value (octal)");
+        ERROR("Syntax: chmod <path> <permissions>");
+        return;
+    }
+
+    if (strcmp(cmd, "move") == 0) {
+        ERROR("Move operation failed.");
+        ERROR("Possible reasons:");
+        ERROR(" - source does not exist");
+        ERROR(" - destination already exists");
+        ERROR(" - invalid path");
+        ERROR("Syntax: move <source> <destination>");
+        return;
+    }
+
+    if (strcmp(cmd, "delete") == 0) {
+        ERROR("Delete operation failed.");
+        ERROR("Possible reasons:");
+        ERROR(" - file or directory does not exist");
+        ERROR("Syntax: delete <path>");
+        return;
+    }
+
+    if (strcmp(cmd, "read") == 0) {
+        ERROR("Read operation failed.");
+        ERROR("Possible reasons:");
+        ERROR(" - file does not exist");
+        ERROR(" - invalid offset");
+        ERROR("Syntax: read <path>");
+        ERROR("        read -offset=N <path>");
+        return;
+    }
+
+    if (strcmp(cmd, "write") == 0) {
+        ERROR("Write operation failed.");
+        ERROR("Possible reasons:");
+        ERROR(" - invalid path");
+        ERROR(" - invalid offset");
+        ERROR("Syntax: write <path>");
+        ERROR("        write -offset=N <path>");
+        return;
+    }
+
+    if (strcmp(cmd, "upload") == 0) {
+        ERROR("Upload failed.");
+        ERROR("Possible reasons:");
+        ERROR(" - local file does not exist");
+        ERROR(" - invalid remote path");
+        ERROR("Syntax: upload <local> <remote>");
+        ERROR("        upload -b <local> <remote>");
+        return;
+    }
+
+    if (strcmp(cmd, "download") == 0) {
+        ERROR("Download failed.");
+        ERROR("Possible reasons:");
+        ERROR(" - remote file does not exist");
+        ERROR("Syntax: download <remote> <local>");
+        ERROR("        download -b <remote> <local>");
+        return;
+    }
+
+    ERROR("Command failed due to an unknown error.");
+    ERROR("Tip: check command syntax and arguments.");
+}
+
+// ============================================================================
 // Simple command sender
 // ============================================================================
 static int sendSimpleCommand(int sock, int cmd, const char *arg1, const char *arg2, const char *arg3)
@@ -120,7 +253,7 @@ static int sendSimpleCommand(int sock, int cmd, const char *arg1, const char *ar
 
     ProtocolResponse res;
     if (receiveResponse(sock, &res) < 0) {
-        ERROR("No response from server");
+        ERROR("No response from server (connection issue?)");
         return -1;
     }
 
@@ -186,7 +319,7 @@ static void startBackgroundUpload(const char *local, const char *remote)
     }
 
     printf(YELLOW "[BG PID=%d] Uploading %s -> %s...\n" RESET, getpid(), local, remote);
-    
+
     int result = uploadFile(bgSock, local, remote);
     close(bgSock);
 
@@ -236,7 +369,7 @@ static void startBackgroundDownload(const char *remote, const char *local)
     }
 
     printf(YELLOW "[BG PID=%d] Downloading %s -> %s...\n" RESET, getpid(), remote, local);
-    
+
     int result = downloadFile(bgSock, remote, local);
     close(bgSock);
 
@@ -264,9 +397,9 @@ int clientHandleInput(int sock, char *input)
     // -----------------------------------------------------------
     // LOGIN
     if (strcmp(cmd, "login") == 0) {
-        if (n < 2) { 
-            ERROR("Usage: login <username>"); 
-            return 0; 
+        if (n < 2) {
+            ERROR("Syntax: login <username>");
+            return 0;
         }
 
         if (sendSimpleCommand(sock, CMD_LOGIN, tokens[1], NULL, NULL) >= 0) {
@@ -275,7 +408,7 @@ int clientHandleInput(int sock, char *input)
             strcpy(g_currentPath, "/");
         }
         else {
-            ERROR("Login failed");
+            explainCommandError("login", tokens[1], NULL, NULL);
         }
         return 0;
     }
@@ -283,61 +416,61 @@ int clientHandleInput(int sock, char *input)
     // -----------------------------------------------------------
     // CREATE USER
     if (strcmp(cmd, "create_user") == 0) {
-        if (n < 3) { 
-            ERROR("Usage: create_user <username> <permissions>"); 
-            return 0; 
+        if (n < 3) {
+            ERROR("Syntax: create_user <username> <permissions>");
+            return 0;
         }
-        
+
         if (sendSimpleCommand(sock, CMD_CREATE_USER, tokens[1], tokens[2], NULL) >= 0)
             SUCCESS("User %s created", tokens[1]);
         else
-            ERROR("Failed to create user");
-        
+            explainCommandError("create_user", tokens[1], tokens[2], NULL);
+
         return 0;
     }
 
     // -----------------------------------------------------------
     // DELETE USER
     if (strcmp(cmd, "delete_user") == 0) {
-        if (n < 2) { 
-            ERROR("Usage: delete_user <username>"); 
-            return 0; 
+        if (n < 2) {
+            ERROR("Syntax: delete_user <username>");
+            return 0;
         }
-        
+
         if (sendSimpleCommand(sock, CMD_DELETE_USER, tokens[1], NULL, NULL) >= 0)
             SUCCESS("User %s deleted", tokens[1]);
         else
-            ERROR("Failed to delete user");
-        
+            explainCommandError("delete_user", tokens[1], NULL, NULL);
+
         return 0;
     }
 
     // -----------------------------------------------------------
     // CD
     if (strcmp(cmd, "cd") == 0) {
-        if (n < 2) { 
-            ERROR("Usage: cd <directory>"); 
-            return 0; 
+        if (n < 2) {
+            ERROR("Syntax: cd <directory>");
+            return 0;
         }
-        
+
         ProtocolMessage msg;
         memset(&msg, 0, sizeof(msg));
         msg.command = CMD_CD;
         strncpy(msg.arg1, tokens[1], ARG_SIZE);
-        
+
         sendMessage(sock, &msg);
-        
+
         ProtocolResponse res;
         if (receiveResponse(sock, &res) < 0) {
             ERROR("No response from server");
             return 0;
         }
-        
+
         if (res.status != STATUS_OK) {
-            ERROR("Cannot change to '%s'", tokens[1]);
+            explainCommandError("cd", tokens[1], NULL, NULL);
             return 0;
         }
-        
+
         if (res.dataSize > 0) {
             char newPath[PATH_SIZE];
             if (res.dataSize < PATH_SIZE) {
@@ -346,7 +479,7 @@ int clientHandleInput(int sock, char *input)
                 updateCurrentPath(newPath);
             }
         }
-        
+
         return 0;
     }
 
@@ -357,7 +490,7 @@ int clientHandleInput(int sock, char *input)
         int dataSize = sendSimpleCommand(sock, CMD_LIST, path, NULL, NULL);
 
         if (dataSize < 0) {
-            ERROR("Failed to list directory");
+            explainCommandError("list", path, NULL, NULL);
             return 0;
         }
 
@@ -367,7 +500,7 @@ int clientHandleInput(int sock, char *input)
 
         printf("%s", buffer);
         free(buffer);
-        
+
         return 0;
     }
 
@@ -375,7 +508,7 @@ int clientHandleInput(int sock, char *input)
     // CREATE
     if (strcmp(cmd, "create") == 0) {
         if (n < 3 || n > 4) {
-            ERROR("Usage: create <path> <permissions> [-d]");
+            ERROR("Syntax: create <path> <permissions> [-d]");
             return 0;
         }
 
@@ -384,12 +517,12 @@ int clientHandleInput(int sock, char *input)
         const char *flag = (n == 4 ? tokens[3] : "");
 
         if (n == 4 && strcmp(flag, "-d") != 0) {
-            ERROR("Usage: create <path> <permissions> [-d]");
+            ERROR("Syntax: create <path> <permissions> [-d]");
             return 0;
         }
 
         if (sendSimpleCommand(sock, CMD_CREATE, path, perm, flag) < 0)
-            ERROR("Create failed");
+            explainCommandError("create", path, perm, flag);
         else
             SUCCESS("Created");
 
@@ -399,48 +532,48 @@ int clientHandleInput(int sock, char *input)
     // -----------------------------------------------------------
     // CHMOD
     if (strcmp(cmd, "chmod") == 0) {
-        if (n < 3) { 
-            ERROR("Usage: chmod <path> <permissions>"); 
-            return 0; 
+        if (n < 3) {
+            ERROR("Syntax: chmod <path> <permissions>");
+            return 0;
         }
-        
+
         if (sendSimpleCommand(sock, CMD_CHMOD, tokens[1], tokens[2], NULL) < 0)
-            ERROR("Failed to change permissions");
+            explainCommandError("chmod", tokens[1], tokens[2], NULL);
         else
             SUCCESS("Permissions changed");
-        
+
         return 0;
     }
 
     // -----------------------------------------------------------
     // MOVE
     if (strcmp(cmd, "move") == 0) {
-        if (n < 3) { 
-            ERROR("Usage: move <src> <dst>"); 
-            return 0; 
+        if (n < 3) {
+            ERROR("Syntax: move <src> <dst>");
+            return 0;
         }
-        
+
         if (sendSimpleCommand(sock, CMD_MOVE, tokens[1], tokens[2], NULL) < 0)
-            ERROR("Failed to move");
+            explainCommandError("move", tokens[1], tokens[2], NULL);
         else
             SUCCESS("Moved");
-        
+
         return 0;
     }
 
     // -----------------------------------------------------------
     // DELETE
     if (strcmp(cmd, "delete") == 0) {
-        if (n < 2) { 
-            ERROR("Usage: delete <path>"); 
-            return 0; 
+        if (n < 2) {
+            ERROR("Syntax: delete <path>");
+            return 0;
         }
-        
+
         if (sendSimpleCommand(sock, CMD_DELETE, tokens[1], NULL, NULL) < 0)
-            ERROR("Failed to delete");
+            explainCommandError("delete", tokens[1], NULL, NULL);
         else
             SUCCESS("Deleted");
-        
+
         return 0;
     }
 
@@ -459,7 +592,7 @@ int clientHandleInput(int sock, char *input)
             strncpy(msg.arg2, tokens[1] + 8, ARG_SIZE);
         }
         else {
-            ERROR("Usage: read <path> OR read -offset=N <path>");
+            ERROR("Syntax: read <path> OR read -offset=N <path>");
             return 0;
         }
 
@@ -467,7 +600,7 @@ int clientHandleInput(int sock, char *input)
 
         ProtocolResponse res;
         if (receiveResponse(sock, &res) < 0 || res.status != STATUS_OK) {
-            ERROR("Failed to read file");
+            explainCommandError("read", msg.arg1, msg.arg2, NULL);
             return 0;
         }
 
@@ -478,7 +611,7 @@ int clientHandleInput(int sock, char *input)
 
         printf("%s\n", buffer);
         free(buffer);
-        
+
         return 0;
     }
 
@@ -497,7 +630,7 @@ int clientHandleInput(int sock, char *input)
             strncpy(msg.arg2, tokens[1] + 8, ARG_SIZE);
         }
         else {
-            ERROR("Usage: write <path> OR write -offset=N <path>");
+            ERROR("Syntax: write <path> OR write -offset=N <path>");
             return 0;
         }
 
@@ -505,12 +638,12 @@ int clientHandleInput(int sock, char *input)
 
         ProtocolResponse ack;
         if (receiveResponse(sock, &ack) < 0 || ack.status != STATUS_OK) {
-            ERROR("Write rejected");
+            explainCommandError("write", msg.arg1, msg.arg2, NULL);
             return 0;
         }
 
         printf("Enter text (press ENTER then Ctrl+D):\n");
-        
+
         char tmp[4096];
         char *buffer = NULL;
         int total = 0, cap = 0, r;
@@ -529,7 +662,7 @@ int clientHandleInput(int sock, char *input)
 
         // UKLONI NEWLINE SA KRAJA AKO POSTOJI
         if (total > 0 && buffer[total - 1] == '\n') {
-            total--;  // Ukloni newline
+            total--;
         }
 
         int size = total;
@@ -545,7 +678,7 @@ int clientHandleInput(int sock, char *input)
         if (fin.status == STATUS_OK)
             SUCCESS("Wrote %d bytes", fin.dataSize);
         else
-            ERROR("Write failed");
+            explainCommandError("write", msg.arg1, msg.arg2, NULL);
 
         return 0;
     }
@@ -559,14 +692,15 @@ int clientHandleInput(int sock, char *input)
         }
 
         if (n == 3) {
-            if (uploadFile(sock, tokens[1], tokens[2]) < 0)
-                ERROR("Upload failed: %s -> %s", tokens[1], tokens[2]);
-            else
+            if (uploadFile(sock, tokens[1], tokens[2]) < 0) {
+                explainCommandError("upload", tokens[1], tokens[2], NULL);
+            } else {
                 SUCCESS("Upload completed: %s -> %s", tokens[1], tokens[2]);
+            }
             return 0;
         }
 
-        ERROR("Usage: upload <local> <remote> OR upload -b <local> <remote>");
+        ERROR("Syntax: upload <local> <remote> OR upload -b <local> <remote>");
         return 0;
     }
 
@@ -579,14 +713,15 @@ int clientHandleInput(int sock, char *input)
         }
 
         if (n == 3) {
-            if (downloadFile(sock, tokens[1], tokens[2]) < 0)
-                ERROR("Download failed: %s -> %s", tokens[1], tokens[2]);
-            else
+            if (downloadFile(sock, tokens[1], tokens[2]) < 0) {
+                explainCommandError("download", tokens[1], tokens[2], NULL);
+            } else {
                 SUCCESS("Download completed: %s -> %s", tokens[1], tokens[2]);
+            }
             return 0;
         }
 
-        ERROR("Usage: download <remote> <local> OR download -b <remote> <local>");
+        ERROR("Syntax: download <remote> <local> OR download -b <remote> <local>");
         return 0;
     }
 

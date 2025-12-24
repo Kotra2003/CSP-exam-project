@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <errno.h>
+
 
 #include "../../include/fsOps.h"
 #include "../../include/utils.h"
@@ -166,15 +168,6 @@ int fsMove(const char *src, const char *dst)
 }
 
 // ============================================================
-// DELETE
-// ============================================================
-
-int fsDelete(const char *path)
-{
-    return unlink(path);
-}
-
-// ============================================================
 // READ — Shared lock
 // ============================================================
 
@@ -207,30 +200,40 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
 int fsWriteFile(const char *path, const char *data, int size, int offset)
 {
     int fd;
-    
-    // UVIJEK otvori bez O_TRUNC da ne obrišemo postojeći sadržaj
-    // O_TRUNC bi obrisao ceo fajl kada offset=0!
-    fd = open(path, O_WRONLY | O_CREAT, 0600);
-    
-    if (fd < 0) return -1;
 
-    // Postavi permisije na 700
-    if (fchmod(fd, 0700) < 0) {
-        close(fd);
-        return -1;
+    /*
+     * Pokušaj ATOMIČKI da kreiraš fajl.
+     * Ako uspije → fajl je NOV i mi smo ga napravili.
+     */
+    fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0700);
+
+    if (fd >= 0) {
+        /* Fajl je nov → ispravi permisije zbog umask */
+        if (fchmod(fd, 0700) < 0) {
+            close(fd);
+            return -1;
+        }
+    } else {
+        /* Ako već postoji → samo ga otvori */
+        if (errno != EEXIST)
+            return -1;
+
+        fd = open(path, O_WRONLY);
+        if (fd < 0)
+            return -1;
     }
 
+    /* Ekskluzivni lock */
     if (lockFileWrite(fd) < 0) {
         close(fd);
-        close(fd);
         return -1;
     }
 
-    // Ako je offset = 0, možda želimo da obrišemo postojeći sadržaj
-    // Ovo zavisi od interpretacije - po specifikaciji, write bez offseta
-    // treba da overwrite-uje ceo fajl
+    /*
+     * Ako je offset == 0:
+     *  - overwrite (truncate)
+     */
     if (offset == 0) {
-        // Obriši postojeći sadržaj (truncate na 0)
         if (ftruncate(fd, 0) < 0) {
             unlockFile(fd);
             close(fd);
@@ -238,21 +241,27 @@ int fsWriteFile(const char *path, const char *data, int size, int offset)
         }
     }
 
-    // Pomjeri se na željeni offset
+    /* Pomjeri se na offset */
     if (lseek(fd, offset, SEEK_SET) < 0) {
         unlockFile(fd);
         close(fd);
         return -1;
     }
 
-    // Zapiši podatke
-    int w = write(fd, data, size);
-    
-    // Ako je offset + size > trenutna veličina, fajl će se automatski proširiti
-    // write() će proširiti fajl ako pišemo izvan trenutne veličine
-    
+    /* Upis podataka */
+    int written = 0;
+    if (size > 0) {
+        written = write(fd, data, size);
+        if (written < 0) {
+            unlockFile(fd);
+            close(fd);
+            return -1;
+        }
+    }
+
     unlockFile(fd);
     close(fd);
-    
-    return w;
+
+    return written;
 }
+

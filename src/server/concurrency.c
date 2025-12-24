@@ -79,7 +79,7 @@ int acquireFileLock(const char *path)
         targetPath = lockPath;
     }
 
-    int fd = open(targetPath, O_CREAT | O_RDWR, 0600);
+    int fd = open(targetPath, O_CREAT | O_RDWR, 0700);
     if (fd < 0) {
         perror("open lock target");
         return -1;

@@ -42,10 +42,13 @@ static void sendErrorMsg(int clientFd)
     sendStatus(clientFd, STATUS_ERROR, 0);
 }
 
+// ================================================================
+// Session / debug helpers
+// ================================================================
 static int ensureLoggedIn(int clientFd, Session *session, const char *cmdName)
 {
     if (!session->isLoggedIn) {
-        printf("[%s] ERROR: user not logged in\n", cmdName);
+        printf("[%s] ERROR: user not logged in (please login first)\n", cmdName);
         fflush(stdout);
         sendErrorMsg(clientFd);
         return 0;
@@ -66,15 +69,14 @@ static void debugCommand(const char *name, ProtocolMessage *msg, Session *s)
 }
 
 // ================================================================
-// Privilege helpers: privremeni root samo kad treba
+// Privilege helpers: temporary root only when required
 // ================================================================
 static int elevateToRoot(uid_t *old_euid)
 {
     *old_euid = geteuid();
 
-    // Pokušaj da postaneš root (radi samo ako je proces startan sa sudo ./server)
     if (seteuid(0) != 0) {
-        perror("seteuid(0)");
+        perror("[PRIV] ERROR: seteuid(0) failed (server not started with sudo)");
         return -1;
     }
     return 0;
@@ -83,9 +85,7 @@ static int elevateToRoot(uid_t *old_euid)
 static void dropFromRoot(uid_t old_euid)
 {
     if (seteuid(old_euid) != 0) {
-        perror("seteuid(revert)");
-        // Ako ovo faila, proces ostaje sa višim privilegijama – u realnom kodu bi ovdje
-        // vjerovatno prekinuli proces. Za projekat je dovoljno da logujemo.
+        perror("[PRIV] ERROR: failed to drop root privileges");
     }
 }
 
@@ -96,23 +96,51 @@ int processCommand(int clientFd, ProtocolMessage *msg, Session *session)
 {
     switch (msg->command)
     {
-        case CMD_LOGIN:       return handleLogin(clientFd, msg, session);
-        case CMD_CREATE_USER: return handleCreateUser(clientFd, msg, session);
-        case CMD_DELETE_USER: return handleDeleteUser(clientFd, msg, session);
-        case CMD_CREATE:      return handleCreate(clientFd, msg, session);
-        case CMD_CHMOD:       return handleChmod(clientFd, msg, session);
-        case CMD_MOVE:        return handleMove(clientFd, msg, session);
-        case CMD_CD:          return handleCd(clientFd, msg, session);
-        case CMD_LIST:        return handleList(clientFd, msg, session);
-        case CMD_READ:        return handleRead(clientFd, msg, session);
-        case CMD_WRITE:       return handleWrite(clientFd, msg, session);
-        case CMD_DELETE:      return handleDelete(clientFd, msg, session);
-        case CMD_UPLOAD:      return handleUpload(clientFd, msg, session);
-        case CMD_DOWNLOAD:    return handleDownload(clientFd, msg, session);
-        case CMD_EXIT:        return 1;
+        case CMD_LOGIN:
+            return handleLogin(clientFd, msg, session);
+
+        case CMD_CREATE_USER:
+            return handleCreateUser(clientFd, msg, session);
+
+        case CMD_DELETE_USER:
+            return handleDeleteUser(clientFd, msg, session);
+
+        case CMD_CREATE:
+            return handleCreate(clientFd, msg, session);
+
+        case CMD_CHMOD:
+            return handleChmod(clientFd, msg, session);
+
+        case CMD_MOVE:
+            return handleMove(clientFd, msg, session);
+
+        case CMD_CD:
+            return handleCd(clientFd, msg, session);
+
+        case CMD_LIST:
+            return handleList(clientFd, msg, session);
+
+        case CMD_READ:
+            return handleRead(clientFd, msg, session);
+
+        case CMD_WRITE:
+            return handleWrite(clientFd, msg, session);
+
+        case CMD_DELETE:
+            return handleDelete(clientFd, msg, session);
+
+        case CMD_UPLOAD:
+            return handleUpload(clientFd, msg, session);
+
+        case CMD_DOWNLOAD:
+            return handleDownload(clientFd, msg, session);
+
+        case CMD_EXIT:
+            return 1;
 
         default:
-            printf("[UNKNOWN] cmd=%d\n", msg->command);
+            printf("[DISPATCH] ERROR: unknown command id %d\n", msg->command);
+            fflush(stdout);
             sendErrorMsg(clientFd);
             return 0;
     }
@@ -663,24 +691,27 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
         if (offset < 0) offset = 0;
     }
 
-    struct stat st;
-    if (stat(fullPath, &st) < 0 || !S_ISREG(st.st_mode)) {
-        sendErrorMsg(clientFd);
-        return 0;
-    }
-
-    int fileSize = (int)st.st_size;
-    if (offset > fileSize) offset = fileSize;
-
-    int toRead = fileSize - offset;
-
+    // ⬇⬇⬇ LOCK PRIJE STAT ⬇⬇⬇
     if (acquireFileLock(fullPath) < 0) {
         printf("[READ] file in use '%s'\n", fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    char *buffer   = NULL;
+    struct stat st;
+    if (stat(fullPath, &st) < 0 || !S_ISREG(st.st_mode)) {
+        releaseFileLock(fullPath);
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    int fileSize = (int)st.st_size;
+    if (offset > fileSize)
+        offset = fileSize;
+
+    int toRead = fileSize - offset;
+
+    char *buffer = NULL;
     int   readBytes = 0;
 
     if (toRead > 0) {
@@ -709,13 +740,14 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
         free(buffer);
     }
 
-    printf("[READ] %d bytes from '%s' (offset=%d)\n", readBytes, fullPath, offset);
+    printf("[READ] %d bytes from '%s' (offset=%d)\n",
+           readBytes, fullPath, offset);
     return 0;
 }
 
+
 // ================================================================
 // WRITE  (PDF: write <path>, write -offset=N <path>)
-// VARIJANTA 1: client šalje VELIČINU + PODATKE
 // ================================================================
 int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 {
@@ -750,20 +782,18 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 1) Pošalji ACK da klijent može poslati veličinu + sadržaj
+    // 1) ACK klijentu
     sendOk(clientFd, 0);
 
-    // 2) Primi int size
+    // 2) primi size
     int size = 0;
     if (recvAll(clientFd, &size, sizeof(int)) < 0 || size < 0) {
-        printf("[WRITE] failed to receive size\n");
         releaseFileLock(fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
 
     char *buffer = NULL;
-    int   written = 0;
 
     if (size > 0) {
         buffer = malloc(size);
@@ -774,34 +804,32 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
         }
 
         if (recvAll(clientFd, buffer, size) < 0) {
-            printf("[WRITE] failed to receive data\n");
             free(buffer);
-            releaseFileLock(fullPath);
-            sendErrorMsg(clientFd);
-            return 0;
-        }
-
-        // fsWriteFile treba da:
-        //  - kreira fajl ako ne postoji (0700)
-        //  - piše od zadanog offseta
-        written = fsWriteFile(fullPath, buffer, size, offset);
-
-        free(buffer);
-
-        if (written < 0) {
             releaseFileLock(fullPath);
             sendErrorMsg(clientFd);
             return 0;
         }
     }
 
+    // ⬇⬇⬇ KLJUČ: piši I kad je size == 0 ⬇⬇⬇
+    int written = fsWriteFile(fullPath, buffer, size, offset);
+
+    if (buffer)
+        free(buffer);
+
     releaseFileLock(fullPath);
 
+    if (written < 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
     sendOk(clientFd, written);
-    printf("[WRITE] %d bytes -> '%s' (offset=%d)\n", written, fullPath, offset);\
-    printf("SERVER RECEIVED OFFSET = '%s'\n", msg->arg2);
+    printf("[WRITE] %d bytes -> '%s' (offset=%d)\n",
+           written, fullPath, offset);
     return 0;
 }
+
 
 // ================================================================
 // DELETE (delete file or directory inside user's home)
@@ -873,7 +901,7 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
     char fullPath[PATH_SIZE];
     int size = atoi(msg->arg2);
 
-    if (!msg->arg1[0] || size <= 0) {
+    if (!msg->arg1[0] || size < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }

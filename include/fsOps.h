@@ -26,7 +26,6 @@ int isInsideRoot(const char *rootDir, const char *fullPath);
 int fsCreate(const char *path, int permissions, int isDirectory);
 int fsChmod(const char *path, int permissions);
 int fsMove(const char *src, const char *dst);
-int fsDelete(const char *path);
 
 int fsReadFile(const char *path, char *buffer, int size, int offset);
 int fsWriteFile(const char *path, const char *data, int size, int offset);
