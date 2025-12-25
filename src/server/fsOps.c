@@ -73,10 +73,22 @@ int resolvePath(Session *s, const char *inputPath, char *outputPath)
         snprintf(vpath, PATH_SIZE, "%s", inputPath + 1);
     else
     {
-        if (curRel[0] == '\0')
+        if (curRel[0] == '\0'){
             snprintf(vpath, PATH_SIZE, "%s", inputPath);
-        else
-            snprintf(vpath, PATH_SIZE, "%s/%s", curRel, inputPath);
+        }
+        else{
+            size_t a = strlen(curRel);
+            size_t b = strlen(inputPath);
+
+            if (a + 1 + b + 1 > PATH_SIZE)
+                return -1;
+
+            memcpy(vpath, curRel, a);
+            vpath[a] = '/';
+            memcpy(vpath + a + 1, inputPath, b);
+            vpath[a + 1 + b] = '\0';
+        }
+
     }
 
     char work[PATH_SIZE];
@@ -110,10 +122,21 @@ int resolvePath(Session *s, const char *inputPath, char *outputPath)
         strncat(relNorm, parts[i], PATH_SIZE - strlen(relNorm) - 1);
     }
 
-    if (relNorm[0] == '\0')
+    if (relNorm[0] == '\0'){
         snprintf(outputPath, PATH_SIZE, "%s", s->homeDir);
-    else
-        snprintf(outputPath, PATH_SIZE, "%s/%s", s->homeDir, relNorm);
+    }
+    else{
+        size_t h = strlen(s->homeDir);
+        size_t r = strlen(relNorm);
+
+        if (h + 1 + r + 1 > PATH_SIZE)
+            return -1;
+
+        memcpy(outputPath, s->homeDir, h);
+        outputPath[h] = '/';
+        memcpy(outputPath + h + 1, relNorm, r);
+        outputPath[h + 1 + r] = '\0';
+    }
 
     return 0;
 }

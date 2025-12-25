@@ -10,6 +10,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <errno.h>
+#include <ctype.h>
 
 #include "../../include/serverCommands.h"
 #include "../../include/protocol.h"
@@ -188,29 +189,60 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("CREATE_USER", msg, session);
 
-    // Osnovne provjere
+    // ------------------------------------------------------------
+    // 1) Validate arguments
+    // ------------------------------------------------------------
     if (msg->arg1[0] == '\0' || msg->arg2[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    const char *username  = msg->arg1;
-    int permissions       = (int)strtol(msg->arg2, NULL, 8);
+    const char *username = msg->arg1;
+    const char *permStr  = msg->arg2;
 
-    if (permissions <= 0) {
+    // ------------------------------------------------------------
+    // 2) Validate username
+    // ------------------------------------------------------------
+    {
+        size_t len = strlen(username);
+        if (len == 0 || len > 32 || username[0] == '-' ||
+            strcmp(username, "root") == 0) {
+            sendErrorMsg(clientFd);
+            return 0;
+        }
+
+        for (size_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)username[i];
+            if (!(isalnum(c) || c == '_' || c == '-')) {
+                sendErrorMsg(clientFd);
+                return 0;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // 3) Validate permissions (octal 0–777)
+    // ------------------------------------------------------------
+    char *endptr = NULL;
+    long perms = strtol(permStr, &endptr, 8);
+
+    if (endptr == permStr || *endptr != '\0' ||
+        perms < 0 || perms > 0777) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    int permissions = (int)perms;
+
+    // ------------------------------------------------------------
+    // 4) Compute virtual home path
+    // ------------------------------------------------------------
     char homePath[PATH_SIZE];
-    snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, username);
+    snprintf(homePath, sizeof(homePath), "%s/%s", gRootDir, username);
 
-    if (fileExists(homePath)) {
-        sendErrorMsg(clientFd);
-        return 0;
-    }
-
-    // Privremeni root
+    // ------------------------------------------------------------
+    // 5) Elevate privileges
+    // ------------------------------------------------------------
     uid_t old_euid;
     if (elevateToRoot(&old_euid) < 0) {
         sendErrorMsg(clientFd);
@@ -218,47 +250,94 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     int error = 0;
+    int userCreated = 0;   // system user created in THIS call
+    int homeCreated = 0;   // virtual home created in THIS call
 
-    do {
-        // 1. Kreiraj korisnika
+    // ------------------------------------------------------------
+    // 6) Hard checks (NO auto cleanup)
+    // ------------------------------------------------------------
+    if (getpwnam(username) != NULL) {
+        error = 1;
+    }
+
+    if (!error && fileExists(homePath)) {
+        error = 1;
+    }
+
+    // ------------------------------------------------------------
+    // 7) Create system user (NO /home)
+    // ------------------------------------------------------------
+    if (!error) {
         pid_t pid = fork();
         if (pid == 0) {
-            execlp("adduser", "adduser", "--disabled-password", "--gecos", "", username, NULL);
-            _exit(1);
-        }
-        waitpid(pid, NULL, 0);
-
-        // 2. Prebaci u csapgroup
-        pid = fork();
-        if (pid == 0) {
-            execlp("usermod", "usermod", "-g", "csapgroup", username, NULL);
-            _exit(1);
-        }
-        waitpid(pid, NULL, 0);
-
-        // 3. Napravi home direktorij
-        if (mkdir(homePath, permissions) < 0) {
+            execlp("adduser", "adduser",
+                   "--disabled-password",
+                   "--gecos", "",
+                   "--ingroup", "csapgroup",
+                   "--no-create-home",
+                   username,
+                   NULL);
+            _exit(127);
+        } else if (pid < 0) {
             error = 1;
-            break;
+        } else {
+            int status;
+            waitpid(pid, &status, 0);
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                error = 1;
+            } else {
+                userCreated = 1;
+            }
         }
+    }
 
-        // 4. Postavi vlasnika i grupu
-        struct group *grp = getgrnam("csapgroup");
+    // ------------------------------------------------------------
+    // 8) Create virtual home directory
+    // ------------------------------------------------------------
+    if (!error) {
+        if (mkdir(homePath, (mode_t)permissions) < 0) {
+            error = 1;
+        } else {
+            homeCreated = 1;
+        }
+    }
+
+    // ------------------------------------------------------------
+    // 9) Set ownership and permissions
+    // ------------------------------------------------------------
+    if (!error) {
         struct passwd *pwd = getpwnam(username);
-        
-        if (!grp || !pwd) {
+        struct group  *grp = getgrnam("csapgroup");
+
+        if (!pwd || !grp ||
+            chown(homePath, pwd->pw_uid, grp->gr_gid) < 0 ||
+            chmod(homePath, (mode_t)permissions) < 0) {
             error = 1;
-            break;
+        }
+    }
+
+    // ------------------------------------------------------------
+    // 10) Rollback (ONLY what was created here)
+    // ------------------------------------------------------------
+    if (error) {
+        if (homeCreated && fileExists(homePath)) {
+            removeRecursive(homePath);
         }
 
-        if (chown(homePath, pwd->pw_uid, grp->gr_gid) < 0 ||
-            chmod(homePath, permissions) < 0) {
-            error = 1;
-            break;
+        if (userCreated) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                execlp("userdel", "userdel", username, NULL);
+                _exit(127);
+            } else if (pid > 0) {
+                waitpid(pid, NULL, 0);
+            }
         }
+    }
 
-    } while (0);
-
+    // ------------------------------------------------------------
+    // 11) Drop privileges
+    // ------------------------------------------------------------
     dropFromRoot(old_euid);
 
     if (error) {
@@ -266,10 +345,11 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    printf("[CREATE_USER] OK '%s'\n", username);
+    printf("[CREATE_USER] OK '%s' perms=%o\n", username, permissions);
     sendOk(clientFd, 0);
     return 0;
 }
+
 
 // ================================================================
 // CREATE FILE / DIR
@@ -612,7 +692,17 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
             continue;
 
         char entryPath[PATH_SIZE];
-        snprintf(entryPath, PATH_SIZE, "%s/%s", fullPath, entry->d_name);
+        size_t fp = strlen(fullPath);
+        size_t en = strlen(entry->d_name);
+
+        if (fp + 1 + en + 1 >= PATH_SIZE)
+            continue; // preskoči preduga imena
+
+        memcpy(entryPath, fullPath, fp);
+        entryPath[fp] = '/';
+        memcpy(entryPath + fp + 1, entry->d_name, en);
+        entryPath[fp + 1 + en] = '\0';
+
 
         // Stat fajla/direktorijuma
         if (stat(entryPath, &st) < 0) {
@@ -1010,76 +1100,108 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 // DELETE USER (sa privremenim root-om)
 // ================================================================
+// ================================================================
+// DELETE USER (sa privremenim root-om) - ROBUST VERSION
+//  - koristi userdel -r (home + mail spool)
+//  - fallback: deluser --remove-home (Debian/Ubuntu)
+//  - čisti rootDir/<user> (tvoj virtual home) bez obzira šta je userdel uradio
+//  - čisti /var/mail/<user> ako je ostalo
+//  - čisti "orphan" grupu sa istim imenom (ako postoji)
+// ================================================================
+// ================================================================
+// DELETE USER (ROBUST, PURE C, NO HELPERS)
+// ================================================================
 int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("DELETE_USER", msg, session);
 
-    // 1) Provjera da li je korisnik logovan (BILO KOJI korisnik)
+    // 1) Mora biti odjavljen
     if (session->isLoggedIn) {
-        printf("[DELETE_USER] This command is only used for cleaning and you can't be logged in!\n");
+        printf("[DELETE_USER] ERROR: must NOT be logged in\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 2) Mora postojati ime korisnika za brisanje
+    // 2) Username obavezan
     if (msg->arg1[0] == '\0') {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    // 2.1) NE SMIJE BITI DODATNIH ARGUMENATA
+    if (msg->arg2[0] != '\0' || msg->arg3[0] != '\0') {
         sendErrorMsg(clientFd);
         return 0;
     }
 
     const char *target = msg->arg1;
 
-    // 3) Složimo path do home foldera
-    char homePath[PATH_SIZE];
-    snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, target);
-
-    if (!fileExists(homePath)) {
-        printf("[DELETE_USER] No such user dir: %s\n", homePath);
+    // 3) Zaštita
+    if (strcmp(target, "root") == 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 4) Privremeno digni privilegije na root
+    // ============================================================
+    // 4) PROVJERI DA LI USER POSTOJI
+    // ============================================================
+    struct passwd *pwd = getpwnam(target);
+    if (!pwd) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    char homePath[PATH_SIZE];
+    snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, target);
+
+    // 5) Privremeni root
     uid_t old_euid;
     if (elevateToRoot(&old_euid) < 0) {
-        printf("[DELETE_USER] ERROR: server not running with sudo.\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
     int error = 0;
 
-    // 5) userdel + remove directory
-    do {
-        // userdel
+    // ============================================================
+    // A) userdel -r <user>
+    // ============================================================
+    {
         pid_t pid = fork();
-        if (pid < 0) { perror("fork"); error = 1; break; }
-
-        if (pid == 0) {
-            execlp("userdel", "userdel", "-f", target, NULL);
-            perror("userdel");
-            _exit(1);
-        }
-
-        int status;
-        if (waitpid(pid, &status, 0) < 0) { perror("waitpid"); error = 1; break; }
-
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            printf("[DELETE_USER] userdel failed\n");
+        if (pid < 0) {
             error = 1;
-            break;
-        }
+        } else if (pid == 0) {
+            execlp("userdel", "userdel", "-r", target, NULL);
+            _exit(127);
+        } else {
+            int status;
+            waitpid(pid, &status, 0);
 
-        // rm -rf home dir
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                error = 1;
+            }
+        }
+    }
+
+    // ============================================================
+    // B) ukloni /var/mail/<user> ako postoji
+    // ============================================================
+    {
+        char mailPath[PATH_SIZE];
+        snprintf(mailPath, sizeof(mailPath), "/var/mail/%s", target);
+        unlink(mailPath); // ignoriši grešku
+    }
+
+    // ============================================================
+    // C) OBRIŠI VIRTUAL HOME U ROOTDIR
+    // ============================================================
+    if (fileExists(homePath)) {
         if (removeRecursive(homePath) < 0) {
-            printf("[DELETE_USER] rm -rf failed: %s\n", homePath);
             error = 1;
-            break;
         }
+    }
 
-    } while (0);
-
-    // 6) Vrati privilegije nazad
+    // 6) Vrati privilegije
     dropFromRoot(old_euid);
 
     if (error) {
@@ -1087,7 +1209,8 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    printf("[DELETE_USER] '%s' deleted successfully (by user '%s')\n", target, session->username);
+    printf("[DELETE_USER] '%s' deleted successfully\n", target);
     sendOk(clientFd, 0);
     return 0;
 }
+

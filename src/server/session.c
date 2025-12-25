@@ -39,10 +39,21 @@ int changeDirectory(Session *s, const char *newAbsPath)
 // Build absolute path from user-provided path (no sandbox check here)
 int buildFullPath(Session *s, const char *userPath, char *outputPath)
 {
-    if (userPath[0] == '/') {
-        snprintf(outputPath, PATH_SIZE, "%s", userPath);
-    } else {
-        snprintf(outputPath, PATH_SIZE, "%s/%s", s->currentDir, userPath);
-    }
+    if (!s || !userPath || !outputPath)
+        return -1;
+
+    size_t len1 = strlen(s->currentDir);
+    size_t len2 = strlen(userPath);
+
+    // +1 za '/', +1 za '\0'
+    if (len1 + 1 + len2 + 1 > PATH_SIZE)
+        return -1;
+
+    memcpy(outputPath, s->currentDir, len1);
+    outputPath[len1] = '/';
+    memcpy(outputPath + len1 + 1, userPath, len2);
+    outputPath[len1 + 1 + len2] = '\0';
+
     return 0;
 }
+

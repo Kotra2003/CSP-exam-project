@@ -20,8 +20,9 @@
 #define BLUE    "\033[34m"
 #define CYAN    "\033[36m"
 
-#define ERROR(fmt, ...)   printf(RED "✗ " fmt RESET "\n", ##__VA_ARGS__)
-#define SUCCESS(fmt, ...) printf(GREEN "✓ " fmt RESET "\n", ##__VA_ARGS__)
+#define ERROR(fmt, ...)   printf(RED    "[X] " fmt RESET "\n", ##__VA_ARGS__)
+#define SUCCESS(fmt, ...) printf(GREEN  "[OK] "    fmt RESET "\n", ##__VA_ARGS__)
+#define SYNTAX(fmt, ...)  printf(YELLOW "[!] " fmt RESET "\n", ##__VA_ARGS__)
 
 // ============================================================================
 // External upload/download from networkClient.c
@@ -118,7 +119,7 @@ static void explainCommandError(const char *cmd,
 
     if (strcmp(cmd, "login") == 0) {
         ERROR("Login failed: user does not exist or you are already logged in.");
-        ERROR("Syntax: login <username>");
+        SYNTAX("Syntax: login <username>");
         return;
     }
 
@@ -127,14 +128,14 @@ static void explainCommandError(const char *cmd,
         ERROR("Possible reasons:");
         ERROR(" - user already exists");
         ERROR(" - invalid permissions (must be octal, e.g. 700)");
-        ERROR("Syntax: create_user <username> <permissions>");
+        SYNTAX("Syntax: create_user <username> <permissions>");
         return;
     }
 
     if (strcmp(cmd, "delete_user") == 0) {
         ERROR("User deletion failed.");
         ERROR("You must NOT be logged in and the user must exist.");
-        ERROR("Syntax: delete_user <username>");
+        SYNTAX("Syntax: delete_user <username>");
         return;
     }
 
@@ -143,7 +144,7 @@ static void explainCommandError(const char *cmd,
         ERROR("Possible reasons:");
         ERROR(" - directory does not exist");
         ERROR(" - directory is outside your home directory");
-        ERROR("Syntax: cd <directory>");
+        SYNTAX("Syntax: cd <directory>");
         return;
     }
 
@@ -152,7 +153,7 @@ static void explainCommandError(const char *cmd,
         ERROR("Possible reasons:");
         ERROR(" - directory does not exist");
         ERROR(" - invalid path");
-        ERROR("Syntax: list [path]");
+        SYNTAX("Syntax: list [path]");
         return;
     }
 
@@ -162,7 +163,7 @@ static void explainCommandError(const char *cmd,
         ERROR(" - file or directory already exists");
         ERROR(" - invalid permissions (0–777, octal)");
         ERROR(" - invalid path");
-        ERROR("Syntax: create <path> <permissions> [-d]");
+        SYNTAX("Syntax: create <path> <permissions> [-d]");
         return;
     }
 
@@ -171,7 +172,7 @@ static void explainCommandError(const char *cmd,
         ERROR("Possible reasons:");
         ERROR(" - file does not exist");
         ERROR(" - invalid permission value (octal)");
-        ERROR("Syntax: chmod <path> <permissions>");
+        SYNTAX("Syntax: chmod <path> <permissions>");
         return;
     }
 
@@ -181,7 +182,7 @@ static void explainCommandError(const char *cmd,
         ERROR(" - source does not exist");
         ERROR(" - destination already exists");
         ERROR(" - invalid path");
-        ERROR("Syntax: move <source> <destination>");
+        SYNTAX("Syntax: move <source> <destination>");
         return;
     }
 
@@ -189,7 +190,7 @@ static void explainCommandError(const char *cmd,
         ERROR("Delete operation failed.");
         ERROR("Possible reasons:");
         ERROR(" - file or directory does not exist");
-        ERROR("Syntax: delete <path>");
+        SYNTAX("Syntax: delete <path>");
         return;
     }
 
@@ -198,8 +199,8 @@ static void explainCommandError(const char *cmd,
         ERROR("Possible reasons:");
         ERROR(" - file does not exist");
         ERROR(" - invalid offset");
-        ERROR("Syntax: read <path>");
-        ERROR("        read -offset=N <path>");
+        SYNTAX("Syntax: read <path>");
+        SYNTAX("        read -offset=N <path>");
         return;
     }
 
@@ -208,8 +209,8 @@ static void explainCommandError(const char *cmd,
         ERROR("Possible reasons:");
         ERROR(" - invalid path");
         ERROR(" - invalid offset");
-        ERROR("Syntax: write <path>");
-        ERROR("        write -offset=N <path>");
+        SYNTAX("Syntax: write <path>");
+        SYNTAX("        write -offset=N <path>");
         return;
     }
 
@@ -218,8 +219,8 @@ static void explainCommandError(const char *cmd,
         ERROR("Possible reasons:");
         ERROR(" - local file does not exist");
         ERROR(" - invalid remote path");
-        ERROR("Syntax: upload <local> <remote>");
-        ERROR("        upload -b <local> <remote>");
+        SYNTAX("Syntax: upload <local> <remote>");
+        SYNTAX("        upload -b <local> <remote>");
         return;
     }
 
@@ -227,8 +228,8 @@ static void explainCommandError(const char *cmd,
         ERROR("Download failed.");
         ERROR("Possible reasons:");
         ERROR(" - remote file does not exist");
-        ERROR("Syntax: download <remote> <local>");
-        ERROR("        download -b <remote> <local>");
+        SYNTAX("Syntax: download <remote> <local>");
+        SYNTAX("        download -b <remote> <local>");
         return;
     }
 
@@ -398,7 +399,7 @@ int clientHandleInput(int sock, char *input)
     // LOGIN
     if (strcmp(cmd, "login") == 0) {
         if (n < 2) {
-            ERROR("Syntax: login <username>");
+            SYNTAX("Syntax: login <username>");
             return 0;
         }
 
@@ -417,7 +418,7 @@ int clientHandleInput(int sock, char *input)
     // CREATE USER
     if (strcmp(cmd, "create_user") == 0) {
         if (n < 3) {
-            ERROR("Syntax: create_user <username> <permissions>");
+            SYNTAX("Syntax: create_user <username> <permissions>");
             return 0;
         }
 
@@ -433,7 +434,7 @@ int clientHandleInput(int sock, char *input)
     // DELETE USER
     if (strcmp(cmd, "delete_user") == 0) {
         if (n < 2) {
-            ERROR("Syntax: delete_user <username>");
+            SYNTAX("Syntax: delete_user <username>");
             return 0;
         }
 
@@ -449,7 +450,7 @@ int clientHandleInput(int sock, char *input)
     // CD
     if (strcmp(cmd, "cd") == 0) {
         if (n < 2) {
-            ERROR("Syntax: cd <directory>");
+            SYNTAX("Syntax: cd <directory>");
             return 0;
         }
 
@@ -462,7 +463,7 @@ int clientHandleInput(int sock, char *input)
 
         ProtocolResponse res;
         if (receiveResponse(sock, &res) < 0) {
-            ERROR("No response from server");
+            SYNTAX("No response from server");
             return 0;
         }
 
@@ -508,7 +509,7 @@ int clientHandleInput(int sock, char *input)
     // CREATE
     if (strcmp(cmd, "create") == 0) {
         if (n < 3 || n > 4) {
-            ERROR("Syntax: create <path> <permissions> [-d]");
+            SYNTAX("Syntax: create <path> <permissions> [-d]");
             return 0;
         }
 
@@ -517,7 +518,7 @@ int clientHandleInput(int sock, char *input)
         const char *flag = (n == 4 ? tokens[3] : "");
 
         if (n == 4 && strcmp(flag, "-d") != 0) {
-            ERROR("Syntax: create <path> <permissions> [-d]");
+            SYNTAX("Syntax: create <path> <permissions> [-d]");
             return 0;
         }
 
@@ -533,7 +534,7 @@ int clientHandleInput(int sock, char *input)
     // CHMOD
     if (strcmp(cmd, "chmod") == 0) {
         if (n < 3) {
-            ERROR("Syntax: chmod <path> <permissions>");
+            SYNTAX("Syntax: chmod <path> <permissions>");
             return 0;
         }
 
@@ -549,7 +550,7 @@ int clientHandleInput(int sock, char *input)
     // MOVE
     if (strcmp(cmd, "move") == 0) {
         if (n < 3) {
-            ERROR("Syntax: move <src> <dst>");
+            SYNTAX("Syntax: move <src> <dst>");
             return 0;
         }
 
@@ -565,7 +566,7 @@ int clientHandleInput(int sock, char *input)
     // DELETE
     if (strcmp(cmd, "delete") == 0) {
         if (n < 2) {
-            ERROR("Syntax: delete <path>");
+            SYNTAX("Syntax: delete <path>");
             return 0;
         }
 
@@ -592,7 +593,7 @@ int clientHandleInput(int sock, char *input)
             strncpy(msg.arg2, tokens[1] + 8, ARG_SIZE);
         }
         else {
-            ERROR("Syntax: read <path> OR read -offset=N <path>");
+            SYNTAX("Syntax: read <path> OR read -offset=N <path>");
             return 0;
         }
 
@@ -630,7 +631,7 @@ int clientHandleInput(int sock, char *input)
             strncpy(msg.arg2, tokens[1] + 8, ARG_SIZE);
         }
         else {
-            ERROR("Syntax: write <path> OR write -offset=N <path>");
+            SYNTAX("Syntax: write <path> OR write -offset=N <path>");
             return 0;
         }
 
@@ -700,7 +701,7 @@ int clientHandleInput(int sock, char *input)
             return 0;
         }
 
-        ERROR("Syntax: upload <local> <remote> OR upload -b <local> <remote>");
+        SYNTAX("Syntax: upload <local> <remote> OR upload -b <local> <remote>");
         return 0;
     }
 
@@ -721,7 +722,7 @@ int clientHandleInput(int sock, char *input)
             return 0;
         }
 
-        ERROR("Syntax: download <remote> <local> OR download -b <remote> <local>");
+        SYNTAX("Syntax: download <remote> <local> OR download -b <remote> <local>");
         return 0;
     }
 

@@ -1,5 +1,3 @@
-// src/server/serverMain.c
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,7 +9,8 @@
 #include <ctype.h>
 #include <errno.h>
 #include <poll.h>
-#include <grp.h>  // Dodano za getgrnam
+#include <grp.h>       // getgrnam
+#include <arpa/inet.h> // inet_pton, struct in_addr
 
 #include "../../include/network.h"
 #include "../../include/protocol.h"
@@ -102,17 +101,17 @@ static int ensureCsapGroupExists(void)
 
     // Kreiraj grupu ako ne postoji (potrebno sudo)
     printf("[INFO] Creating group 'csapgroup'...\n");
-    
+
     pid_t pid = fork();
     if (pid == 0) {
         execlp("groupadd", "groupadd", "csapgroup", NULL);
         perror("execlp groupadd");
         _exit(1);
     }
-    
+
     int status;
     waitpid(pid, &status, 0);
-    
+
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
         printf("[INFO] Group 'csapgroup' created successfully\n");
         return 0;
@@ -171,18 +170,18 @@ static void runConsoleWatcher(pid_t parentPid)
 int main(int argc, char *argv[])
 {
     umask(000);
-    
+
     // =====================================================
     // FLEKSIBILNO PARSIRANJE ARGUMENATA:
     // ./server <root_directory> [<IP>] [<port>]
     // Default: 127.0.0.1:8080
     // =====================================================
-    
+
     // Default vrednosti
     const char *rootDir = NULL;
     const char *ip = "127.0.0.1";
     int port = 8080;
-    
+
     // Minimalno: 1 argument (root_dir)
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <root_directory> [<IP>] [<port>]\n", argv[0]);
@@ -192,9 +191,9 @@ int main(int argc, char *argv[])
         fprintf(stderr, "  %s /var/myroot 0.0.0.0 9090\n", argv[0]);
         return 1;
     }
-    
+
     rootDir = argv[1];
-    
+
     // Ako ima 3 ili više argumenata, treći je port
     if (argc >= 4) {
         port = atoi(argv[3]);
@@ -210,12 +209,12 @@ int main(int argc, char *argv[])
         // Ako je sve brojevi, možda je port
         int allDigits = 1;
         for (int i = 0; argv[2][i] != '\0'; i++) {
-            if (!isdigit(argv[2][i])) {
+            if (!isdigit((unsigned char)argv[2][i])) {
                 allDigits = 0;
                 break;
             }
         }
-        
+
         if (allDigits) {
             // Drugi argument je port, IP ostaje default
             port = atoi(argv[2]);
@@ -284,6 +283,25 @@ int main(int argc, char *argv[])
     saInt.sa_handler = handleShutdownSignal;
     sigaction(SIGINT, &saInt, NULL);
 
+    // =====================================================
+    // FIX: VALIDACIJA IP-a PRIJE createServerSocket()
+    // inet_pton vraća 0 za "invalid IP" i tada errno nije setovan.
+    // Zato NE SMIJE perror za return==0.
+    // =====================================================
+    {
+        struct in_addr tmp;
+        int ok = inet_pton(AF_INET, ip, &tmp);
+
+        if (ok == 0) {
+            fprintf(stderr, "FATAL: Invalid IPv4 address: %s\n", ip);
+            return 1;
+        }
+        if (ok < 0) {
+            perror("inet_pton");
+            return 1;
+        }
+    }
+
     // Kreiraj server socket
     int serverFd = createServerSocket(ip, port);
     if (serverFd < 0) {
@@ -305,39 +323,39 @@ int main(int argc, char *argv[])
     struct pollfd pfds[1];
     pfds[0].fd = serverFd;
     pfds[0].events = POLLIN;
-    
+
     int pollTimeout = 1000; // 1 sekund (u milisekundama)
 
     // Accept loop sa poll()
     while (!shutdownRequested) {
         int pollRet = poll(pfds, 1, pollTimeout);
-        
+
         if (pollRet < 0) {
             if (errno == EINTR) continue; // Signal primljen
             perror("poll");
             break;
         }
-        
+
         if (pollRet == 0) {
             // Timeout - proveri da li je shutdown zahtevan
             continue;
         }
-        
+
         // Ima nova konekcija
         if (pfds[0].revents & POLLIN) {
             int clientFd = acceptClient(serverFd);
-            
+
             if (shutdownRequested) {
                 if (clientFd >= 0) close(clientFd);
                 break;
             }
-            
+
             if (clientFd < 0) {
                 if (errno == EINTR) continue;
                 perror("acceptClient");
                 continue;
             }
-            
+
             pid_t pid = fork();
 
             if (pid == 0) {
@@ -384,7 +402,7 @@ int main(int argc, char *argv[])
             kill(children[i], SIGTERM);
         }
     }
-    
+
     // Sačekaj da sva deca završe
     while (waitpid(-1, NULL, 0) > 0) {}
 

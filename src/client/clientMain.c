@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <arpa/inet.h>
 
 #include "../../include/network.h"
 #include "../../include/utils.h"
@@ -109,15 +110,50 @@ int main(int argc, char *argv[])
     // ================================
     // DEFAULTNE VRIJEDNOSTI
     // ================================
-    const char *ip = "127.0.0.1";
-    int port = 8080;
+    // ================================
+        // DEFAULTNE VRIJEDNOSTI + SAFE ARG PARSING
+        // Usage:
+        //   ./client
+        //   ./client <ip> <port>
+        // ================================
+        const char *ip = "127.0.0.1";
+        int port = 8080;
 
-    if (argc == 3) {
-        ip = argv[1];
-        port = atoi(argv[2]);
-    }
+        if (argc == 1) {
+            // ./client -> defaults
+        }
+        else if (argc == 3) {
+            // ./client <ip> <port>
 
-    setGlobalServerInfo(ip, port);
+            // Validate IP (avoid inet_pton: Success noise)
+            struct in_addr tmp;
+            if (inet_pton(AF_INET, argv[1], &tmp) != 1) {
+                printf(RED "[X] Invalid IP address: %s\n" RESET, argv[1]);
+                printf(YELLOW "[!] Usage: ./client [<ip> <port>]\n" RESET);
+                return 1;
+            }
+
+            // Validate port
+            char *endptr = NULL;
+            long p = strtol(argv[2], &endptr, 10);
+            if (!endptr || *endptr != '\0' || p <= 0 || p > 65535) {
+                printf(RED "[X] Invalid port: %s\n" RESET, argv[2]);
+                printf(YELLOW "[!] Port must be between 1 and 65535\n" RESET);
+                return 1;
+            }
+
+            ip = argv[1];
+            port = (int)p;
+        }
+        else {
+            // Any other number of args
+            printf(RED "[X] Invalid arguments\n" RESET);
+            printf(YELLOW "[!] Usage: ./client [<ip> <port>]\n" RESET);
+            return 1;
+        }
+
+        setGlobalServerInfo(ip, port);
+
 
     int sock = connectToServer(ip, port);
     if (sock < 0) {
