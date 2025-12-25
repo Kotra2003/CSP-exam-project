@@ -5,12 +5,13 @@
 #include <dirent.h>
 #include <stdlib.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <pwd.h>
 #include <grp.h>
 #include <errno.h>
 #include <ctype.h>
+#include <sys/types.h>
+
 
 #include "../../include/serverCommands.h"
 #include "../../include/protocol.h"
@@ -21,6 +22,16 @@
 #include "../../include/network.h"
 
 extern const char *gRootDir;
+
+static inline void debugWhoAmI(const char *where)
+{
+    printf("[WHOAMI] %-20s | ruid=%d euid=%d rgid=%d egid=%d\n",
+           where,
+           getuid(), geteuid(),
+           getgid(), getegid());
+    fflush(stdout);
+}
+
 
 // ================================================================
 // Helper: send simple response
@@ -89,6 +100,57 @@ static void dropFromRoot(uid_t old_euid)
         perror("[PRIV] ERROR: failed to drop root privileges");
     }
 }
+// ================================================================
+// Switch THIS child process to the logged-in user identity
+//  - sets egid to csapgroup
+//  - sets supplementary groups (initgroups)
+//  - sets euid to user's uid
+//  - does NOT stay root (root only via elevateToRoot when needed)
+// ================================================================
+static int becomeLoggedUser(const char *username)
+{
+    uid_t old_euid;
+
+    // Need root briefly to switch identity
+    if (elevateToRoot(&old_euid) < 0) {
+        return -1;
+    }
+
+    struct passwd *pwd = getpwnam(username);
+    struct group  *grp = getgrnam("csapgroup");
+
+    if (!pwd || !grp) {
+        dropFromRoot(old_euid);
+        return -1;
+    }
+
+    // Set primary group for this process
+    if (setegid(grp->gr_gid) != 0) {
+        perror("[LOGIN] setegid failed");
+        dropFromRoot(old_euid);
+        return -1;
+    }
+
+    // Set supplementary groups (important if your system/group config differs)
+    if (initgroups(username, grp->gr_gid) != 0) {
+        perror("[LOGIN] initgroups failed");
+        dropFromRoot(old_euid);
+        return -1;
+    }
+
+    // Drop to user
+    if (seteuid(pwd->pw_uid) != 0) {
+        perror("[LOGIN] seteuid(user) failed");
+        dropFromRoot(old_euid);
+        return -1;
+    }
+
+    // IMPORTANT:
+    // Do NOT call dropFromRoot(old_euid) here, because that would revert euid back.
+    // From now on, this child runs as the logged-in user.
+    return 0;
+}
+
 
 // ================================================================
 // DISPATCHER
@@ -152,6 +214,8 @@ int processCommand(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleLogin(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("LOGIN");
+
     debugCommand("LOGIN", msg, session);
 
     if (session->isLoggedIn) {
@@ -169,15 +233,41 @@ int handleLogin(int clientFd, ProtocolMessage *msg, Session *session)
     char homePath[PATH_SIZE];
     snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, msg->arg1);
 
-    if (!fileExists(homePath)) {
+    // Check existence with root (because home may be 0700)
+    uid_t old_euid;
+    if (elevateToRoot(&old_euid) < 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    int exists = fileExists(homePath);
+
+    dropFromRoot(old_euid);
+
+    if (!exists) {
         printf("[LOGIN] ERROR: no such user dir '%s'\n", homePath);
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // Set session paths
     loginUser(session, gRootDir, msg->arg1);
 
-    printf("[LOGIN] OK user='%s'\n", session->username);
+    // NOW: child process becomes that user (this is the key fix)
+    if (becomeLoggedUser(session->username) < 0) {
+        printf("[LOGIN] ERROR: cannot switch to user '%s'\n", session->username);
+        // rollback session
+        session->isLoggedIn = 0;
+        session->username[0] = '\0';
+        session->homeDir[0] = '\0';
+        session->currentDir[0] = '\0';
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    printf("[LOGIN] OK user='%s' (euid=%d egid=%d)\n",
+           session->username, (int)geteuid(), (int)getegid());
+
     sendOk(clientFd, 0);
     return 0;
 }
@@ -187,6 +277,7 @@ int handleLogin(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("CREATE_USER (entry)");
     debugCommand("CREATE_USER", msg, session);
 
     // ------------------------------------------------------------
@@ -243,11 +334,15 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     // ------------------------------------------------------------
     // 5) Elevate privileges
     // ------------------------------------------------------------
+    //debugWhoAmI("CREATE_USER before root");
+
     uid_t old_euid;
     if (elevateToRoot(&old_euid) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
+    //debugWhoAmI("CREATE_USER after root");
+
 
     int error = 0;
     int userCreated = 0;   // system user created in THIS call
@@ -339,6 +434,8 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     // 11) Drop privileges
     // ------------------------------------------------------------
     dropFromRoot(old_euid);
+    //debugWhoAmI("CREATE_USER after drop");
+
 
     if (error) {
         sendErrorMsg(clientFd);
@@ -355,6 +452,8 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("CREATE");
+
     debugCommand("CREATE", msg, session);
 
     if (!ensureLoggedIn(clientFd, session, "CREATE"))
@@ -414,6 +513,8 @@ int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("CHMOD");
+
     debugCommand("CHMOD", msg, session);
 
     // 1) Mora biti logovan
@@ -516,6 +617,8 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("MOVE");
+
     debugCommand("MOVE", msg, session);
 
     if (!ensureLoggedIn(clientFd, session, "MOVE"))
@@ -569,6 +672,8 @@ int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("CD");
+
     debugCommand("CD", msg, session);
 
     if (!ensureLoggedIn(clientFd, session, "CD"))
@@ -644,6 +749,8 @@ int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleList(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("LIST");
+
     debugCommand("LIST", msg, session);
 
     if (!ensureLoggedIn(clientFd, session, "LIST"))
@@ -816,6 +923,8 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("READ");
+
     debugCommand("READ", msg, session);
 
     if (!ensureLoggedIn(clientFd, session, "READ"))
@@ -905,6 +1014,8 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("WRITE");
+
     debugCommand("WRITE", msg, session);
 
     if (!ensureLoggedIn(clientFd, session, "WRITE"))
@@ -993,6 +1104,8 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("DELETE");
+
     debugCommand("DELETE", msg, session);
 
     if (!ensureLoggedIn(clientFd, session, "DELETE"))
@@ -1054,6 +1167,8 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("UPLOAD");
+
     debugCommand("UPLOAD", msg, session);
 
     if (!ensureLoggedIn(clientFd, session, "UPLOAD"))
@@ -1119,6 +1234,8 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("DOWNLOAD");
+
     debugCommand("DOWNLOAD", msg, session);
 
     if (!ensureLoggedIn(clientFd, session, "DOWNLOAD"))
@@ -1181,6 +1298,9 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    //debugWhoAmI("DELETE_USER (entry)");
+
+
     debugCommand("DELETE_USER", msg, session);
 
     // 1) Mora biti odjavljen
@@ -1222,12 +1342,16 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
     char homePath[PATH_SIZE];
     snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, target);
 
+    //debugWhoAmI("DELETE_USER before root");
+
     // 5) Privremeni root
     uid_t old_euid;
     if (elevateToRoot(&old_euid) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
+    //debugWhoAmI("DELETE_USER after root");
+
 
     int error = 0;
 
@@ -1271,6 +1395,8 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 
     // 6) Vrati privilegije
     dropFromRoot(old_euid);
+    //debugWhoAmI("DELETE_USER after drop");
+
 
     if (error) {
         sendErrorMsg(clientFd);
