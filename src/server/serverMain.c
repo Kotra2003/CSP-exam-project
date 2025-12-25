@@ -124,16 +124,14 @@ static int ensureCsapGroupExists(void)
 // ------------------------------------------------------------
 // Banner
 // ------------------------------------------------------------
-static void printBanner(const char *root, const char *ip, int port, int sudoMode)
+static void printBanner(const char *root, const char *ip, int port)
 {
     printf("\n");
     printf("============================================================\n");
     printf("                        FILE SERVER\n");
     printf("------------------------------------------------------------\n");
-    printf(" - Root Directory : %s\n", root);
-    printf(" - Listening on   : %s:%d\n", ip, port);
-    printf(" - Privileges     : %s\n",
-           sudoMode ? "user management ENABLED" : "user management DISABLED");
+    printf("              - Root Directory : %s\n", root);
+    printf("              - Listening on   : %s:%d\n", ip, port);
     printf("============================================================\n\n");
     fflush(stdout);
 }
@@ -237,26 +235,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // Privilegije (sudo ili ne)
-    uid_t ruid = getuid();
-    uid_t euid = geteuid();
-    int sudoMode = 0;
-
-    if (euid == 0 && ruid != 0) {
-        sudoMode = 1;
-        printf("[SECURITY] Running with sudo (ruid=%d). Dropping privileges.\n", (int)ruid);
-
-        if (seteuid(ruid) != 0) {
-            perror("seteuid drop");
-            return 1;
-        }
-    } else if (euid == 0 && ruid == 0) {
-        sudoMode = 1;
-    } else {
-        sudoMode = 0;
-        printf("[SECURITY] Running as normal user – usermgmt disabled.\n");
-    }
-
     gRootDir = rootDir;
 
     if (ensureRootDirectory(rootDir) < 0) {
@@ -309,7 +287,38 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    printBanner(rootDir, ip, port, sudoMode);
+    uid_t target_uid;
+    gid_t target_gid;
+
+    char *su = getenv("SUDO_UID");
+    char *sg = getenv("SUDO_GID");
+
+    if (su && sg) {
+        target_uid = (uid_t)atoi(su);
+        target_gid = (gid_t)atoi(sg);
+    } else {
+        // Ako NIJE pokrenuto sa sudo
+        target_uid = getuid();
+        target_gid = getgid();
+    }
+
+    if (geteuid() == 0) {
+        if (setegid(target_gid) != 0) {
+            perror("setegid");
+            exit(1);
+        }
+        if (seteuid(target_uid) != 0) {
+            perror("seteuid");
+            exit(1);
+        }
+    }
+
+    printf("[SECURITY] Runtime ruid=%d euid=%d target=%d\n",
+       getuid(), geteuid(), target_uid);
+
+
+
+    printBanner(rootDir, ip, port);
 
     // Console watcher proces
     pid_t consolePid = fork();

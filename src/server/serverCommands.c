@@ -350,7 +350,6 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     return 0;
 }
 
-
 // ================================================================
 // CREATE FILE / DIR
 // ================================================================
@@ -395,7 +394,8 @@ int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    if (!isInsideRoot(session->homeDir, fullPath) || fileExists(fullPath)) {
+    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    if (!isInsideHome(session->homeDir, fullPath) || fileExists(fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -410,76 +410,107 @@ int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
 }
 
 // ================================================================
-// CHMOD
+// CHMOD - SA DEBUG ISPISIMA
 // ================================================================
 int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("CHMOD", msg, session);
 
-    if (!ensureLoggedIn(clientFd, session, "CHMOD"))
+    // 1) Mora biti logovan
+    if (!ensureLoggedIn(clientFd, session, "CHMOD")) {
+        printf("[CHMOD DEBUG] Not logged in\n");
         return 0;
+    }
 
-    char fullPath[PATH_SIZE];
-
-    // -----------------------------
-    // Validate args exist
-    // -----------------------------
+    // 2) Argumenti moraju postojati
     if (msg->arg1[0] == '\0' || msg->arg2[0] == '\0') {
+        printf("[CHMOD DEBUG] Missing arguments\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // -----------------------------
-    // Validate permissions (0–777)
-    // -----------------------------
-    char *endptr;
+    // 3) Validacija permission-a (0–777 oktalno)
+    char *endptr = NULL;
     long perms = strtol(msg->arg2, &endptr, 8);
 
-    if (*endptr != '\0' || perms < 0 || perms > 0777) {
-        printf("[CHMOD] invalid permissions: %s\n", msg->arg2);
+    if (endptr == msg->arg2 || *endptr != '\0' ||
+        perms < 0 || perms > 0777) {
+        printf("[CHMOD DEBUG] Invalid permissions: %s\n", msg->arg2);
         sendErrorMsg(clientFd);
         return 0;
     }
 
     int permissions = (int)perms;
+    printf("[CHMOD DEBUG] Permissions parsed: %o\n", permissions);
 
-    // -----------------------------
-    // Resolve full path
-    // -----------------------------
-    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
-        !isInsideRoot(session->homeDir, fullPath) ||
-        !fileExists(fullPath)) {
-
+    // 4) Resolve path
+    char fullPath[PATH_SIZE];
+    if (resolvePath(session, msg->arg1, fullPath) < 0) {
+        printf("[CHMOD DEBUG] resolvePath failed for: %s\n", msg->arg1);
         sendErrorMsg(clientFd);
         return 0;
     }
+    
+    printf("[CHMOD DEBUG] Resolved path: %s\n", fullPath);
+    printf("[CHMOD DEBUG] Home dir: %s\n", session->homeDir);
 
-    // -----------------------------
-    // Acquire lock (IMPORTANT)
-    // -----------------------------
+    // 5) Mora biti unutar home direktorija
+    if (!isInsideHome(session->homeDir, fullPath)) {
+        printf("[CHMOD DEBUG] Not inside home: %s\n", fullPath);
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+    
+    printf("[CHMOD DEBUG] Inside home: OK\n");
+
+    // 6) Mora postojati
+    if (!fileExists(fullPath)) {
+        printf("[CHMOD DEBUG] File doesn't exist: %s\n", fullPath);
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+    
+    printf("[CHMOD DEBUG] File exists: OK\n");
+
+    // 7) Zaštita: samo root servera ne može mijenjati
+    if (strcmp(fullPath, gRootDir) == 0) {
+        printf("[CHMOD DEBUG] Cannot modify server root\n");
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+    
+    printf("[CHMOD DEBUG] Not server root: OK\n");
+
+    // 8) Zaključaj target
     if (acquireFileLock(fullPath) < 0) {
-        printf("[CHMOD] file is locked: %s\n", fullPath);
+        printf("[CHMOD DEBUG] acquireFileLock failed for: %s\n", fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
+    
+    printf("[CHMOD DEBUG] File locked: OK\n");
 
-    // -----------------------------
-    // Do chmod
-    // -----------------------------
-    int ok = fsChmod(fullPath, permissions);
+    // 9) Izvrši chmod (bez root privilegija)
+    printf("[CHMOD DEBUG] Calling fsChmod(%s, %o)\n", fullPath, permissions);
+    int rc = fsChmod(fullPath, permissions);
+    printf("[CHMOD DEBUG] fsChmod returned: %d\n", rc);
 
-    // Release lock
+    // 10) Oslobodi lock
     releaseFileLock(fullPath);
+    printf("[CHMOD DEBUG] File unlocked\n");
 
-    if (ok < 0) {
+    // 11) Provjeri rezultat
+    if (rc < 0) {
+        printf("[CHMOD DEBUG] fsChmod failed\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 12) Sve OK
+    printf("[CHMOD DEBUG] Success! Sending OK to client\n");
     sendOk(clientFd, 0);
     return 0;
 }
-
 // ================================================================
 // MOVE
 // ================================================================
@@ -499,16 +530,15 @@ int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
 
     if (resolvePath(session, msg->arg1, src) < 0 ||
         resolvePath(session, msg->arg2, dst) < 0) {
-
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    if (!isInsideRoot(session->homeDir, src) ||
-        !isInsideRoot(session->homeDir, dst) ||
+    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    if (!isInsideHome(session->homeDir, src) ||
+        !isInsideHome(session->homeDir, dst) ||
         !fileExists(src) ||
         fileExists(dst)) {
-
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -560,9 +590,13 @@ int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // Resolve path
-    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
-        !isInsideRoot(session->homeDir, fullPath)) {
-        
+    if (resolvePath(session, msg->arg1, fullPath) < 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
+
+    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -605,7 +639,9 @@ int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 // LIST
 // ================================================================
-
+// ================================================================
+// LIST - POPRAVLJENA VERZIJA
+// ================================================================
 int handleList(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("LIST", msg, session);
@@ -642,6 +678,7 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
 
     // ============================================
     // 2) Provjeri da li je putanja unutar root-a
+    // LIST JE JEDINA KOJA MOŽE IZAĆI IZ HOME, ALI NE IZ ROOT-A
     // ============================================
     if (!isInsideRoot(gRootDir, fullPath)) {
         printf("[LIST] ERROR: Path outside root: '%s'\n", fullPath);
@@ -659,6 +696,8 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
+    mode_t mode = st.st_mode;
+
     if (!S_ISDIR(st.st_mode)) {
         printf("[LIST] ERROR: Not a directory: '%s'\n", fullPath);
         sendErrorMsg(clientFd);
@@ -666,7 +705,30 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ============================================
-    // 4) OTVORI DIREKTORIJ
+    // 4) PROVJERA PERMISIJA - KLJUČNA POPRAVKA!
+    // ============================================
+    
+    // Ako je direktorij unutar MOG home-a, gledaj OWNER permisije
+    if (isInsideHome(session->homeDir, fullPath)) {
+        // Ja sam vlasnik (jer je u mom home-u), gledaj owner permisije
+        if (!(mode & S_IRUSR) || !(mode & S_IXUSR)) {
+            printf("[LIST] PERMISSION DENIED (owner) for '%s'\n", fullPath);
+            sendErrorMsg(clientFd);
+            return 0;
+        }
+    }
+    else {
+        // Direktorij je izvan mog home-a (tudji home), gledaj GROUP permisije
+        // Jer svi korisnici su u istoj grupi (csapgroup)
+        if (!(mode & S_IRGRP) || !(mode & S_IXGRP)) {
+            printf("[LIST] PERMISSION DENIED (group) for '%s'\n", fullPath);
+            sendErrorMsg(clientFd);
+            return 0;
+        }
+    }
+
+    // ============================================
+    // 5) OTVORI DIREKTORIJ
     // ============================================
     DIR *dir = opendir(fullPath);
     if (!dir) {
@@ -702,7 +764,6 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
         entryPath[fp] = '/';
         memcpy(entryPath + fp + 1, entry->d_name, en);
         entryPath[fp + 1 + en] = '\0';
-
 
         // Stat fajla/direktorijuma
         if (stat(entryPath, &st) < 0) {
@@ -767,10 +828,14 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
 
     char fullPath[PATH_SIZE];
 
-    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
-        !isInsideRoot(session->homeDir, fullPath) ||
-        !fileExists(fullPath)) {
+    if (resolvePath(session, msg->arg1, fullPath) < 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
 
+    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    if (!isInsideHome(session->homeDir, fullPath) ||
+        !fileExists(fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -835,7 +900,6 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
     return 0;
 }
 
-
 // ================================================================
 // WRITE  (PDF: write <path>, write -offset=N <path>)
 // ================================================================
@@ -853,9 +917,13 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 
     char fullPath[PATH_SIZE];
 
-    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
-        !isInsideRoot(session->homeDir, fullPath)) {
+    if (resolvePath(session, msg->arg1, fullPath) < 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
 
+    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -920,7 +988,6 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
     return 0;
 }
 
-
 // ================================================================
 // DELETE (delete file or directory inside user's home)
 // ================================================================
@@ -938,10 +1005,14 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
 
     char fullPath[PATH_SIZE];
 
-    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
-        !isInsideRoot(session->homeDir, fullPath) ||
-        !fileExists(fullPath)) {
+    if (resolvePath(session, msg->arg1, fullPath) < 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
 
+    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    if (!isInsideHome(session->homeDir, fullPath) ||
+        !fileExists(fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -996,9 +1067,13 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    if (resolvePath(session, msg->arg1, fullPath) < 0 ||
-        !isInsideRoot(session->homeDir, fullPath)) {
+    if (resolvePath(session, msg->arg1, fullPath) < 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
 
+    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -1052,9 +1127,13 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
     char fullPath[PATH_SIZE];
 
     if (!msg->arg1[0] ||
-        resolvePath(session, msg->arg1, fullPath) < 0 ||
-        !isInsideRoot(session->homeDir, fullPath)) {
+        resolvePath(session, msg->arg1, fullPath) < 0) {
+        sendErrorMsg(clientFd);
+        return 0;
+    }
 
+    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -1099,17 +1178,6 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 
 // ================================================================
 // DELETE USER (sa privremenim root-om)
-// ================================================================
-// ================================================================
-// DELETE USER (sa privremenim root-om) - ROBUST VERSION
-//  - koristi userdel -r (home + mail spool)
-//  - fallback: deluser --remove-home (Debian/Ubuntu)
-//  - čisti rootDir/<user> (tvoj virtual home) bez obzira šta je userdel uradio
-//  - čisti /var/mail/<user> ako je ostalo
-//  - čisti "orphan" grupu sa istim imenom (ako postoji)
-// ================================================================
-// ================================================================
-// DELETE USER (ROBUST, PURE C, NO HELPERS)
 // ================================================================
 int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
@@ -1213,4 +1281,3 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
     sendOk(clientFd, 0);
     return 0;
 }
-

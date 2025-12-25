@@ -22,6 +22,7 @@ int unlockFile(int fd);
 
 int resolvePath(Session *s, const char *inputPath, char *outputPath);
 int isInsideRoot(const char *rootDir, const char *fullPath);
+int isInsideHome(const char *homeDir, const char *fullPath);  // DODAJ OVO!
 
 int fsCreate(const char *path, int permissions, int isDirectory);
 int fsChmod(const char *path, int permissions);

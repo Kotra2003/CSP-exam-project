@@ -5,10 +5,13 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
-
+#include <limits.h>
+#include <libgen.h>
 
 #include "../../include/fsOps.h"
 #include "../../include/utils.h"
+
+extern const char *gRootDir;
 
 // ============================================================
 // LOCKING IMPLEMENTATION — fcntl()
@@ -20,6 +23,8 @@ int lockFileRead(int fd)
     memset(&fl, 0, sizeof(fl));
     fl.l_type   = F_RDLCK;   // shared lock
     fl.l_whence = SEEK_SET;
+    fl.l_start  = 0;
+    fl.l_len    = 0;         // whole file
 
     return fcntl(fd, F_SETLKW, &fl);   // block until lock acquired
 }
@@ -30,6 +35,8 @@ int lockFileWrite(int fd)
     memset(&fl, 0, sizeof(fl));
     fl.l_type   = F_WRLCK;   // exclusive lock
     fl.l_whence = SEEK_SET;
+    fl.l_start  = 0;
+    fl.l_len    = 0;         // whole file
 
     return fcntl(fd, F_SETLKW, &fl);   // block until lock acquired
 }
@@ -40,131 +47,191 @@ int unlockFile(int fd)
     memset(&fl, 0, sizeof(fl));
     fl.l_type   = F_UNLCK;
     fl.l_whence = SEEK_SET;
+    fl.l_start  = 0;
+    fl.l_len    = 0;
 
     return fcntl(fd, F_SETLK, &fl);
 }
 
 // ============================================================
-// resolvePath (originalni kod – netaknut)
+// POMOĆNE FUNKCIJE ZA PATH HANDLING
 // ============================================================
 
+// Normaliziraj path - ukloni /./, /../, višestruke //
+static char* normalize_path(const char *path, char *normalized, size_t size) {
+    if (!path || !normalized || size == 0) return NULL;
+    
+    char tmp[PATH_SIZE];
+    strncpy(tmp, path, sizeof(tmp));
+    tmp[sizeof(tmp)-1] = '\0';
+    
+    char *components[256];
+    int count = 0;
+    
+    // Rastavi na komponente
+    char *token = strtok(tmp, "/");
+    while (token != NULL && count < 256) {
+        if (strcmp(token, ".") == 0) {
+            // ignoriraj
+        } else if (strcmp(token, "..") == 0) {
+            if (count > 0) count--;
+        } else {
+            components[count++] = token;
+        }
+        token = strtok(NULL, "/");
+    }
+    
+    // Sastavi normalizirani path
+    normalized[0] = '\0';
+    if (path[0] == '/') {
+        strcat(normalized, "/");
+    }
+    
+    for (int i = 0; i < count; i++) {
+        if (i > 0) strcat(normalized, "/");
+        strcat(normalized, components[i]);
+    }
+    
+    if (count == 0 && path[0] == '/') {
+        strcpy(normalized, "/");
+    }
+    
+    return normalized;
+}
+
+// ============================================================
+// NOVA IMPLEMENTACIJA resolvePath
+// ============================================================
 int resolvePath(Session *s, const char *inputPath, char *outputPath)
 {
-    if (!s || !inputPath || !outputPath) return -1;
-
-    char curRel[PATH_SIZE] = "";
-    size_t homeLen = strlen(s->homeDir);
-
-    if (strncmp(s->currentDir, s->homeDir, homeLen) == 0)
-    {
-        if (s->currentDir[homeLen] == '\0')
-            curRel[0] = '\0';
-        else if (s->currentDir[homeLen] == '/')
-            strncpy(curRel, s->currentDir + homeLen + 1, PATH_SIZE);
-        else
-            strncpy(curRel, s->currentDir, PATH_SIZE);
+    if (!s || !inputPath || !outputPath) {
+        return -1;
     }
-
-    char vpath[PATH_SIZE];
-
-    if (inputPath[0] == '\0' || strcmp(inputPath, ".") == 0)
-        snprintf(vpath, PATH_SIZE, "%s", curRel);
-    else if (inputPath[0] == '/')
-        snprintf(vpath, PATH_SIZE, "%s", inputPath + 1);
-    else
-    {
-        if (curRel[0] == '\0'){
-            snprintf(vpath, PATH_SIZE, "%s", inputPath);
+    
+    char normalized[PATH_SIZE];
+    char result[PATH_SIZE];
+    result[0] = '\0';
+    
+    // 1) Odredi bazu za razrješavanje
+    char base[PATH_SIZE];
+    if (inputPath[0] == '/') {
+        // Apsolutna putanja - počinje od korijena (ali ne root dir servera, nego korijena unutar root dir-a)
+        if (s->isLoggedIn) {
+            // Ako je logovan, / znači njegov home
+            snprintf(base, PATH_SIZE, "%s", s->homeDir);
+        } else {
+            // Nije logovan - ne bi trebalo doći ovdje
+            snprintf(base, PATH_SIZE, "%s", gRootDir);
         }
-        else{
-            size_t a = strlen(curRel);
-            size_t b = strlen(inputPath);
-
-            if (a + 1 + b + 1 > PATH_SIZE)
-                return -1;
-
-            memcpy(vpath, curRel, a);
-            vpath[a] = '/';
-            memcpy(vpath + a + 1, inputPath, b);
-            vpath[a + 1 + b] = '\0';
+    } else {
+        // Relativna putanja - počinje od trenutnog direktorija
+        snprintf(base, PATH_SIZE, "%s", s->currentDir);
+    }
+    
+    // 2) Konstruiši punu putanju
+    if (strcmp(inputPath, "/") == 0 || strcmp(inputPath, "") == 0) {
+        // Root ili prazno - vraća bazu
+        strncpy(result, base, PATH_SIZE - 1);
+        result[PATH_SIZE - 1] = '\0';
+    } else if (inputPath[0] == '/') {
+        // Apsolutna putanja (unutar home ili root)
+        if (s->isLoggedIn) {
+            // /drugi_user/file -> gRootDir/drugi_user/file
+            snprintf(result, PATH_SIZE, "%s%s", gRootDir, inputPath);
+        } else {
+            snprintf(result, PATH_SIZE, "%s%s", gRootDir, inputPath);
         }
-
-    }
-
-    char work[PATH_SIZE];
-    strncpy(work, vpath, PATH_SIZE);
-
-    char *parts[256];
-    int count = 0;
-
-    char *tok = strtok(work, "/");
-    while (tok)
-    {
-        if (strcmp(tok, ".") == 0)
-        {
+    } else {
+        // Relativna putanja - sigurno kopiranje
+        size_t base_len = strlen(base);
+        size_t input_len = strlen(inputPath);
+        
+        if (base_len + 1 + input_len + 1 > PATH_SIZE) {
+            return -1; // Predugačka putanja
         }
-        else if (strcmp(tok, "..") == 0)
-        {
-            if (count > 0) count--;
+        
+        strcpy(result, base);
+        if (base[base_len - 1] != '/') {
+            strcat(result, "/");
         }
-        else
-            parts[count++] = tok;
-
-        tok = strtok(NULL, "/");
+        strcat(result, inputPath);
     }
-
-    char relNorm[PATH_SIZE];
-    relNorm[0] = '\0';
-
-    for (int i = 0; i < count; i++)
-    {
-        if (i > 0) strncat(relNorm, "/", PATH_SIZE - strlen(relNorm) - 1);
-        strncat(relNorm, parts[i], PATH_SIZE - strlen(relNorm) - 1);
+    
+    // 3) Normaliziraj putanju (obrađi . i ..)
+    normalize_path(result, normalized, PATH_SIZE);
+    
+    // 4) Provjeri da li je unutar root direktorija servera
+    if (strncmp(normalized, gRootDir, strlen(gRootDir)) != 0) {
+        return -1; // Izvan root-a
     }
-
-    if (relNorm[0] == '\0'){
-        snprintf(outputPath, PATH_SIZE, "%s", s->homeDir);
-    }
-    else{
-        size_t h = strlen(s->homeDir);
-        size_t r = strlen(relNorm);
-
-        if (h + 1 + r + 1 > PATH_SIZE)
-            return -1;
-
-        memcpy(outputPath, s->homeDir, h);
-        outputPath[h] = '/';
-        memcpy(outputPath + h + 1, relNorm, r);
-        outputPath[h + 1 + r] = '\0';
-    }
-
+    
+    // 5) Kopiraj rezultat u output
+    strncpy(outputPath, normalized, PATH_SIZE);
+    outputPath[PATH_SIZE - 1] = '\0';
+    
     return 0;
 }
 
 // ============================================================
-
+// NOVA IMPLEMENTACIJA isInsideRoot
+// ============================================================
 int isInsideRoot(const char *rootDir, const char *fullPath)
 {
-    int len = strlen(rootDir);
-
-    if (strncmp(rootDir, fullPath, len) != 0)
+    if (!rootDir || !fullPath) return 0;
+    
+    size_t rootLen = strlen(rootDir);
+    
+    // Provjeri da putanja počinje sa rootDir
+    if (strncmp(rootDir, fullPath, rootLen) != 0) {
         return 0;
+    }
+    
+    // Provjeri da je nakon rootDir ili '/'
+    if (fullPath[rootLen] == '\0') {
+        return 1; // Točno root dir
+    }
+    
+    if (fullPath[rootLen] == '/') {
+        return 1; // Pod-direktorij unutar root
+    }
+    
+    return 0; // Nešto drugo (npr. rootDir_something)
+}
 
-    return (fullPath[len] == '\0' || fullPath[len] == '/');
+// ============================================================
+// NOVA FUNKCIJA: Provjeri da li je putanja unutar user home
+// ============================================================
+int isInsideHome(const char *homeDir, const char *fullPath)
+{
+    if (!homeDir || !fullPath) return 0;
+    
+    size_t homeLen = strlen(homeDir);
+    
+    // Provjeri da putanja počinje sa homeDir
+    if (strncmp(homeDir, fullPath, homeLen) != 0) {
+        return 0;
+    }
+    
+    // Provjeri da je nakon homeDir ili '/'
+    if (fullPath[homeLen] == '\0') {
+        return 1; // Točno home dir
+    }
+    
+    if (fullPath[homeLen] == '/') {
+        return 1; // Pod-direktorij unutar home
+    }
+    
+    return 0; // Nešto drugo
 }
 
 // ============================================================
 // CREATE
 // ============================================================
-
 int fsCreate(const char *path, int permissions, int isDirectory)
 {
-    if (isDirectory)
-    {
+    if (isDirectory) {
         if (mkdir(path, permissions) < 0) return -1;
-    }
-    else
-    {
+    } else {
         int fd = open(path, O_CREAT | O_EXCL, permissions);
         if (fd < 0) return -1;
         close(fd);
@@ -175,7 +242,6 @@ int fsCreate(const char *path, int permissions, int isDirectory)
 // ============================================================
 // CHMOD
 // ============================================================
-
 int fsChmod(const char *path, int permissions)
 {
     return chmod(path, permissions);
@@ -184,7 +250,6 @@ int fsChmod(const char *path, int permissions)
 // ============================================================
 // MOVE / RENAME
 // ============================================================
-
 int fsMove(const char *src, const char *dst)
 {
     return rename(src, dst);
@@ -193,16 +258,17 @@ int fsMove(const char *src, const char *dst)
 // ============================================================
 // READ — Shared lock
 // ============================================================
-
 int fsReadFile(const char *path, char *buffer, int size, int offset)
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return -1;
 
-    if (lockFileRead(fd) < 0) { close(fd); return -1; }
+    if (lockFileRead(fd) < 0) { 
+        close(fd); 
+        return -1; 
+    }
 
-    if (lseek(fd, offset, SEEK_SET) < 0)
-    {
+    if (lseek(fd, offset, SEEK_SET) < 0) {
         unlockFile(fd);
         close(fd);
         return -1;
@@ -219,7 +285,6 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
 // ============================================================
 // WRITE — Exclusive lock
 // ============================================================
-
 int fsWriteFile(const char *path, const char *data, int size, int offset)
 {
     int fd;
@@ -287,4 +352,3 @@ int fsWriteFile(const char *path, const char *data, int size, int offset)
 
     return written;
 }
-
