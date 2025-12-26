@@ -3,23 +3,27 @@
 
 #include "session.h"
 
-// Remove trailing newline (if present)
+// Remove trailing newline character from a string, if present.
+// Useful when reading input with fgets().
 void removeNewline(char *str);
 
-// Check if a string contains only numeric digits (0–9)
+// Check whether a string contains only numeric characters (0–9).
+// Used for validating permission values and numeric arguments.
 int isNumeric(const char *str);
 
-// Safely join two paths: base + "/" + child  (caller must ensure buffer is large enough)
+// Safely join two filesystem paths: base + "/" + child.
+// The caller must ensure that the output buffer is large enough.
 void joinPaths(const char *base, const char *child, char *output);
 
-// Generate a small random ID (for transfer_request)
+// Generate a small random identifier.
+// Used for transfer_request handling.
 int generateId();
 
-// Check if file or directory exists
+// Check whether a file or directory exists on the filesystem.
 int fileExists(const char *path);
 
-// Recursively remove file or directory tree (rm -rf style).
-// Returns 0 on success, -1 on error.
+// Recursively remove a file or directory tree (rm -rf style).
+// Used for delete operations on directories.
 int removeRecursive(const char *path);
 
 #endif

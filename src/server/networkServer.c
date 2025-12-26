@@ -8,19 +8,21 @@
 
 // ------------------------------------------------------------
 // Create listening server socket
+// Binds to IP:port and starts listening
 // ------------------------------------------------------------
 int createServerSocket(const char *ip, int port)
 {
     int serverFd;
     struct sockaddr_in addr;
 
+    // Create TCP socket
     serverFd = socket(AF_INET, SOCK_STREAM, 0);
     if (serverFd < 0) {
         perror("socket");
         return -1;
     }
 
-    // Allow quick port reuse (important for dev/testing)
+    // Allow fast port reuse (useful during development)
     int opt = 1;
     if (setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         perror("setsockopt");
@@ -29,25 +31,30 @@ int createServerSocket(const char *ip, int port)
     }
 
 #ifdef SO_REUSEPORT
+    // Optional: allow multiple binds on same port (platform-dependent)
     setsockopt(serverFd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
 
+    // Prepare bind address
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port   = htons(port);
 
+    // Convert IP string to binary form
     if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
         perror("inet_pton");
         close(serverFd);
         return -1;
     }
 
+    // Bind socket to address
     if (bind(serverFd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind");
         close(serverFd);
         return -1;
     }
 
+    // Start listening for incoming connections
     if (listen(serverFd, 20) < 0) {
         perror("listen");
         close(serverFd);
@@ -58,13 +65,14 @@ int createServerSocket(const char *ip, int port)
 }
 
 // ------------------------------------------------------------
-// Accept new client
+// Accept new client connection
 // ------------------------------------------------------------
 int acceptClient(int serverFd)
 {
     struct sockaddr_in cliAddr;
     socklen_t len = sizeof(cliAddr);
 
+    // Accept incoming connection
     int fd = accept(serverFd, (struct sockaddr *)&cliAddr, &len);
     if (fd < 0) {
         perror("accept");
@@ -75,12 +83,14 @@ int acceptClient(int serverFd)
 }
 
 // ------------------------------------------------------------
-// sendAll - send EXACTLY "size" bytes
+// sendAll
+// Sends EXACTLY "size" bytes over TCP
 // ------------------------------------------------------------
 int sendAll(int sock, const void *buffer, int size)
 {
     int total = 0;
 
+    // Handle partial sends
     while (total < size) {
         int sent = send(sock, (char *)buffer + total, size - total, 0);
 
@@ -100,12 +110,14 @@ int sendAll(int sock, const void *buffer, int size)
 }
 
 // ------------------------------------------------------------
-// recvAll - receive EXACTLY "size" bytes
+// recvAll
+// Receives EXACTLY "size" bytes over TCP
 // ------------------------------------------------------------
 int recvAll(int sock, void *buffer, int size)
 {
     int total = 0;
 
+    // Handle partial receives
     while (total < size) {
         int r = recv(sock, (char *)buffer + total, size - total, 0);
 

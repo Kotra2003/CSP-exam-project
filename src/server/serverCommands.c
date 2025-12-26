@@ -12,7 +12,6 @@
 #include <ctype.h>
 #include <sys/types.h>
 
-
 #include "../../include/serverCommands.h"
 #include "../../include/protocol.h"
 #include "../../include/session.h"
@@ -21,8 +20,12 @@
 #include "../../include/concurrency.h"
 #include "../../include/network.h"
 
+// Global server root directory
 extern const char *gRootDir;
 
+// ================================================================
+// Debug helper: print real/effective UID and GID
+// ================================================================
 static inline void debugWhoAmI(const char *where)
 {
     printf("[WHOAMI] %-20s | ruid=%d euid=%d rgid=%d egid=%d\n",
@@ -32,9 +35,8 @@ static inline void debugWhoAmI(const char *where)
     fflush(stdout);
 }
 
-
 // ================================================================
-// Helper: send simple response
+// Helper: send simple response to client
 // ================================================================
 static void sendStatus(int clientFd, int status, int dataSize)
 {
@@ -44,11 +46,13 @@ static void sendStatus(int clientFd, int status, int dataSize)
     sendResponse(clientFd, &res);
 }
 
+// Send STATUS_OK
 static void sendOk(int clientFd, int dataSize)
 {
     sendStatus(clientFd, STATUS_OK, dataSize);
 }
 
+// Send STATUS_ERROR
 static void sendErrorMsg(int clientFd)
 {
     sendStatus(clientFd, STATUS_ERROR, 0);
@@ -57,6 +61,8 @@ static void sendErrorMsg(int clientFd)
 // ================================================================
 // Session / debug helpers
 // ================================================================
+
+// Ensure user is logged in before executing command
 static int ensureLoggedIn(int clientFd, Session *session, const char *cmdName)
 {
     if (!session->isLoggedIn) {
@@ -68,6 +74,7 @@ static int ensureLoggedIn(int clientFd, Session *session, const char *cmdName)
     return 1;
 }
 
+// Print debug information about received command
 static void debugCommand(const char *name, ProtocolMessage *msg, Session *s)
 {
     printf("[%s] cmd=%d, arg1='%s', arg2='%s', arg3='%s', loggedIn=%d\n",
@@ -83,6 +90,8 @@ static void debugCommand(const char *name, ProtocolMessage *msg, Session *s)
 // ================================================================
 // Privilege helpers: temporary root only when required
 // ================================================================
+
+// Temporarily elevate effective UID to root
 static int elevateToRoot(uid_t *old_euid)
 {
     *old_euid = geteuid();
@@ -94,24 +103,26 @@ static int elevateToRoot(uid_t *old_euid)
     return 0;
 }
 
+// Drop root privileges and restore previous effective UID
 static void dropFromRoot(uid_t old_euid)
 {
     if (seteuid(old_euid) != 0) {
         perror("[PRIV] ERROR: failed to drop root privileges");
     }
 }
+
 // ================================================================
 // Switch THIS child process to the logged-in user identity
-//  - sets egid to csapgroup
-//  - sets supplementary groups (initgroups)
-//  - sets euid to user's uid
-//  - does NOT stay root (root only via elevateToRoot when needed)
+//  - set effective GID to "csapgroup"
+//  - set supplementary groups (initgroups)
+//  - set effective UID to user's UID
+//  - process stays as user (root only via elevateToRoot when needed)
 // ================================================================
 static int becomeLoggedUser(const char *username)
 {
     uid_t old_euid;
 
-    // Need root briefly to switch identity
+    // Temporarily become root to change identity
     if (elevateToRoot(&old_euid) < 0) {
         return -1;
     }
@@ -124,36 +135,39 @@ static int becomeLoggedUser(const char *username)
         return -1;
     }
 
-    // Set primary group for this process
+    // Set effective group ID
     if (setegid(grp->gr_gid) != 0) {
         perror("[LOGIN] setegid failed");
         dropFromRoot(old_euid);
         return -1;
     }
 
-    // Set supplementary groups (important if your system/group config differs)
+    // Initialize supplementary groups for user
     if (initgroups(username, grp->gr_gid) != 0) {
         perror("[LOGIN] initgroups failed");
         dropFromRoot(old_euid);
         return -1;
     }
 
-    // Drop to user
+    // Drop privileges to logged-in user
     if (seteuid(pwd->pw_uid) != 0) {
         perror("[LOGIN] seteuid(user) failed");
         dropFromRoot(old_euid);
         return -1;
     }
 
-    // IMPORTANT:
-    // Do NOT call dropFromRoot(old_euid) here, because that would revert euid back.
-    // From now on, this child runs as the logged-in user.
+    /*
+     * IMPORTANT:
+     * We intentionally do NOT restore old_euid here.
+     * From this point, the child process runs as the logged-in user.
+     * Root privileges are re-acquired only via elevateToRoot().
+     */
     return 0;
 }
 
-
 // ================================================================
-// DISPATCHER
+// COMMAND DISPATCHER
+// Routes protocol command IDs to handler functions
 // ================================================================
 int processCommand(int clientFd, ProtocolMessage *msg, Session *session)
 {
@@ -199,9 +213,11 @@ int processCommand(int clientFd, ProtocolMessage *msg, Session *session)
             return handleDownload(clientFd, msg, session);
 
         case CMD_EXIT:
+            // Signal server loop to close connection
             return 1;
 
         default:
+            // Unknown command
             printf("[DISPATCH] ERROR: unknown command id %d\n", msg->command);
             fflush(stdout);
             sendErrorMsg(clientFd);
@@ -210,30 +226,35 @@ int processCommand(int clientFd, ProtocolMessage *msg, Session *session)
 }
 
 // ================================================================
-// LOGIN
+// LOGIN HANDLER
+// Authenticates user and switches process identity
 // ================================================================
 int handleLogin(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    //debugWhoAmI("LOGIN");
-
+    // Debug: print command and session state
     debugCommand("LOGIN", msg, session);
 
+    // Prevent double login
     if (session->isLoggedIn) {
         printf("[LOGIN] ERROR: already logged in.\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // Username must be provided
     if (msg->arg1[0] == '\0') {
         printf("[LOGIN] ERROR: missing username.\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // Build expected home directory path
     char homePath[PATH_SIZE];
     snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, msg->arg1);
 
-    // Check existence with root (because home may be 0700)
+    // ------------------------------------------------------------
+    // Check user directory existence (requires root)
+    // ------------------------------------------------------------
     uid_t old_euid;
     if (elevateToRoot(&old_euid) < 0) {
         sendErrorMsg(clientFd);
@@ -242,6 +263,7 @@ int handleLogin(int clientFd, ProtocolMessage *msg, Session *session)
 
     int exists = fileExists(homePath);
 
+    // Drop root privileges immediately
     dropFromRoot(old_euid);
 
     if (!exists) {
@@ -250,17 +272,21 @@ int handleLogin(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // Set session paths
+    // Initialize session (username, homeDir, currentDir)
     loginUser(session, gRootDir, msg->arg1);
 
-    // NOW: child process becomes that user (this is the key fix)
+    // ------------------------------------------------------------
+    // Switch THIS child process to the logged-in user
+    // ------------------------------------------------------------
     if (becomeLoggedUser(session->username) < 0) {
         printf("[LOGIN] ERROR: cannot switch to user '%s'\n", session->username);
-        // rollback session
-        session->isLoggedIn = 0;
-        session->username[0] = '\0';
-        session->homeDir[0] = '\0';
+
+        // Roll back session state
+        session->isLoggedIn    = 0;
+        session->username[0]   = '\0';
+        session->homeDir[0]    = '\0';
         session->currentDir[0] = '\0';
+
         sendErrorMsg(clientFd);
         return 0;
     }
@@ -273,11 +299,12 @@ int handleLogin(int clientFd, ProtocolMessage *msg, Session *session)
 }
 
 // ================================================================
-// CREATE USER (sa privremenim root-om)
+// CREATE USER
+// Creates a new user directory (requires root privileges)
 // ================================================================
 int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
-    //debugWhoAmI("CREATE_USER (entry)");
+    // Debug: print command info
     debugCommand("CREATE_USER", msg, session);
 
     // ------------------------------------------------------------
@@ -292,16 +319,19 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     const char *permStr  = msg->arg2;
 
     // ------------------------------------------------------------
-    // 2) Validate username
+    // 2) Validate username format
     // ------------------------------------------------------------
     {
         size_t len = strlen(username);
+
+        // Basic sanity checks
         if (len == 0 || len > 32 || username[0] == '-' ||
             strcmp(username, "root") == 0) {
             sendErrorMsg(clientFd);
             return 0;
         }
 
+        // Allow only [a-zA-Z0-9_-]
         for (size_t i = 0; i < len; i++) {
             unsigned char c = (unsigned char)username[i];
             if (!(isalnum(c) || c == '_' || c == '-')) {
@@ -311,12 +341,14 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
         }
     }
 
-    // ------------------------------------------------------------
+
+        // ------------------------------------------------------------
     // 3) Validate permissions (octal 0–777)
     // ------------------------------------------------------------
     char *endptr = NULL;
     long perms = strtol(permStr, &endptr, 8);
 
+    // Must be valid octal and in range
     if (endptr == permStr || *endptr != '\0' ||
         perms < 0 || perms > 0777) {
         sendErrorMsg(clientFd);
@@ -332,35 +364,31 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     snprintf(homePath, sizeof(homePath), "%s/%s", gRootDir, username);
 
     // ------------------------------------------------------------
-    // 5) Elevate privileges
+    // 5) Elevate privileges (root required)
     // ------------------------------------------------------------
-    //debugWhoAmI("CREATE_USER before root");
-
     uid_t old_euid;
     if (elevateToRoot(&old_euid) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
-    //debugWhoAmI("CREATE_USER after root");
-
 
     int error = 0;
-    int userCreated = 0;   // system user created in THIS call
-    int homeCreated = 0;   // virtual home created in THIS call
+    int userCreated = 0;   // System user created in this call
+    int homeCreated = 0;   // Home directory created in this call
 
     // ------------------------------------------------------------
-    // 6) Hard checks (NO auto cleanup)
+    // 6) Hard checks (no auto-cleanup here)
     // ------------------------------------------------------------
     if (getpwnam(username) != NULL) {
-        error = 1;
+        error = 1; // System user already exists
     }
 
     if (!error && fileExists(homePath)) {
-        error = 1;
+        error = 1; // Virtual home already exists
     }
 
     // ------------------------------------------------------------
-    // 7) Create system user (NO /home)
+    // 7) Create system user (without /home)
     // ------------------------------------------------------------
     if (!error) {
         pid_t pid = fork();
@@ -412,13 +440,15 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ------------------------------------------------------------
-    // 10) Rollback (ONLY what was created here)
+    // 10) Rollback (only what was created here)
     // ------------------------------------------------------------
     if (error) {
+        // Remove virtual home if created
         if (homeCreated && fileExists(homePath)) {
             removeRecursive(homePath);
         }
 
+        // Remove system user if created
         if (userCreated) {
             pid_t pid = fork();
             if (pid == 0) {
@@ -431,11 +461,9 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ------------------------------------------------------------
-    // 11) Drop privileges
+    // 11) Drop root privileges
     // ------------------------------------------------------------
     dropFromRoot(old_euid);
-    //debugWhoAmI("CREATE_USER after drop");
-
 
     if (error) {
         sendErrorMsg(clientFd);
@@ -447,15 +475,19 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     return 0;
 }
 
+
 // ================================================================
-// CREATE FILE / DIR
+// CREATE FILE OR DIRECTORY
 // ================================================================
 int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    // Optional debug: print real/effective UID/GID
     //debugWhoAmI("CREATE");
 
+    // Print command info for debugging
     debugCommand("CREATE", msg, session);
 
+    // 1) User must be logged in
     if (!ensureLoggedIn(clientFd, session, "CREATE"))
         return 0;
 
@@ -463,17 +495,19 @@ int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
     const char *permArg = msg->arg2;
     const char *typeArg = msg->arg3;
 
+    // 2) Basic argument validation
     if (!pathArg[0] || !permArg[0]) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
     // ============================================
-    // VALIDACIJA PERMISSIONA (0–777 OKTALNO)
+    // PERMISSION VALIDATION (octal 0–777)
     // ============================================
     char *endptr;
     long perms = strtol(permArg, &endptr, 8);
 
+    // Must be valid octal value
     if (*endptr != '\0' || perms < 0 || perms > 0777) {
         printf("[CREATE] invalid permissions: %s\n", permArg);
         sendErrorMsg(clientFd);
@@ -483,54 +517,61 @@ int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
     int permissions = (int)perms;
 
     // ============================================
-    // DA LI JE DIRECTORY?
+    // CHECK IF DIRECTORY FLAG IS SET
     // ============================================
+    // "-d" means directory, otherwise create file
     int isDir = (strcmp(typeArg, "-d") == 0);
 
+    // 3) Resolve absolute filesystem path
     char fullPath[PATH_SIZE];
     if (resolvePath(session, pathArg, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    // 4) Security checks:
+    //    - must be inside user's home directory
+    //    - target must not already exist
     if (!isInsideHome(session->homeDir, fullPath) || fileExists(fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 5) Create file or directory
     if (fsCreate(fullPath, permissions, isDir) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 6) Success
     sendOk(clientFd, 0);
     return 0;
 }
-
 // ================================================================
-// CHMOD - SA DEBUG ISPISIMA
+// CHMOD
 // ================================================================
 int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    // Optional debug: print UID/GID
     //debugWhoAmI("CHMOD");
 
+    // Print command data for debugging
     debugCommand("CHMOD", msg, session);
 
-    // 1) Mora biti logovan
+    // 1) User must be logged in
     if (!ensureLoggedIn(clientFd, session, "CHMOD")) {
         printf("[CHMOD DEBUG] Not logged in\n");
         return 0;
     }
 
-    // 2) Argumenti moraju postojati
+    // 2) Arguments must exist
     if (msg->arg1[0] == '\0' || msg->arg2[0] == '\0') {
         printf("[CHMOD DEBUG] Missing arguments\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 3) Validacija permission-a (0–777 oktalno)
+    // 3) Validate permissions (octal 0–777)
     char *endptr = NULL;
     long perms = strtol(msg->arg2, &endptr, 8);
 
@@ -544,100 +585,110 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
     int permissions = (int)perms;
     printf("[CHMOD DEBUG] Permissions parsed: %o\n", permissions);
 
-    // 4) Resolve path
+    // 4) Resolve full path
     char fullPath[PATH_SIZE];
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         printf("[CHMOD DEBUG] resolvePath failed for: %s\n", msg->arg1);
         sendErrorMsg(clientFd);
         return 0;
     }
-    
+
     printf("[CHMOD DEBUG] Resolved path: %s\n", fullPath);
     printf("[CHMOD DEBUG] Home dir: %s\n", session->homeDir);
 
-    // 5) Mora biti unutar home direktorija
+    // 5) Path must be inside user's home directory
     if (!isInsideHome(session->homeDir, fullPath)) {
         printf("[CHMOD DEBUG] Not inside home: %s\n", fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
-    
+
     printf("[CHMOD DEBUG] Inside home: OK\n");
 
-    // 6) Mora postojati
+    // 6) Target must exist
     if (!fileExists(fullPath)) {
         printf("[CHMOD DEBUG] File doesn't exist: %s\n", fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
-    
+
     printf("[CHMOD DEBUG] File exists: OK\n");
 
-    // 7) Zaštita: samo root servera ne može mijenjati
+    // 7) Protect server root directory
     if (strcmp(fullPath, gRootDir) == 0) {
         printf("[CHMOD DEBUG] Cannot modify server root\n");
         sendErrorMsg(clientFd);
         return 0;
     }
-    
+
     printf("[CHMOD DEBUG] Not server root: OK\n");
 
-    // 8) Zaključaj target
+    // 8) Acquire exclusive lock on target
     if (acquireFileLock(fullPath) < 0) {
         printf("[CHMOD DEBUG] acquireFileLock failed for: %s\n", fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
-    
+
     printf("[CHMOD DEBUG] File locked: OK\n");
 
-    // 9) Izvrši chmod (bez root privilegija)
+    // 9) Perform chmod as logged-in user (no root)
     printf("[CHMOD DEBUG] Calling fsChmod(%s, %o)\n", fullPath, permissions);
     int rc = fsChmod(fullPath, permissions);
     printf("[CHMOD DEBUG] fsChmod returned: %d\n", rc);
 
-    // 10) Oslobodi lock
+    // 10) Release lock
     releaseFileLock(fullPath);
     printf("[CHMOD DEBUG] File unlocked\n");
 
-    // 11) Provjeri rezultat
+    // 11) Check result
     if (rc < 0) {
         printf("[CHMOD DEBUG] fsChmod failed\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 12) Sve OK
+    // 12) Success
     printf("[CHMOD DEBUG] Success! Sending OK to client\n");
     sendOk(clientFd, 0);
     return 0;
 }
+
+
 // ================================================================
-// MOVE
+// MOVE (rename / move file or directory)
 // ================================================================
 int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    // Optional UID/GID debug
     //debugWhoAmI("MOVE");
 
+    // Print command details for debugging
     debugCommand("MOVE", msg, session);
 
+    // 1) User must be logged in
     if (!ensureLoggedIn(clientFd, session, "MOVE"))
         return 0;
 
     char src[PATH_SIZE], dst[PATH_SIZE];
 
+    // 2) Both source and destination arguments must exist
     if (!msg->arg1[0] || !msg->arg2[0]) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 3) Resolve absolute paths
     if (resolvePath(session, msg->arg1, src) < 0 ||
         resolvePath(session, msg->arg2, dst) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    // 4) Security checks:
+    //    - both paths must be inside user's home
+    //    - source must exist
+    //    - destination must NOT exist
     if (!isInsideHome(session->homeDir, src) ||
         !isInsideHome(session->homeDir, dst) ||
         !fileExists(src) ||
@@ -646,6 +697,7 @@ int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
+    // 5) Acquire locks on both paths (prevent race conditions)
     if (acquireFileLock(src) < 0 || acquireFileLock(dst) < 0) {
         releaseFileLock(src);
         releaseFileLock(dst);
@@ -653,39 +705,48 @@ int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
+    // 6) Perform move / rename
     int ok = fsMove(src, dst);
 
+    // 7) Release locks
     releaseFileLock(src);
     releaseFileLock(dst);
 
+    // 8) Check result
     if (ok < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 9) Success
     sendOk(clientFd, 0);
     return 0;
 }
 
+
 // ================================================================
-// CD
+// CD (change directory)
 // ================================================================
 int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    // Optional UID/GID debug
     //debugWhoAmI("CD");
 
+    // Print command details for debugging
     debugCommand("CD", msg, session);
 
+    // 1) User must be logged in
     if (!ensureLoggedIn(clientFd, session, "CD"))
         return 0;
 
     char fullPath[PATH_SIZE];
 
+    // 2) No argument: go to home directory
     if (msg->arg1[0] == '\0') {
-        // cd bez argumenata - vrati na home
+        // Update session current directory to home
         strncpy(session->currentDir, session->homeDir, PATH_SIZE);
-        
-        // Vrati putanju za prikaz
+
+        // Send "/" as display path
         char displayPath[PATH_SIZE] = "/";
         sendOk(clientFd, strlen(displayPath));
         if (strlen(displayPath) > 0) {
@@ -694,49 +755,51 @@ int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // Resolve path
+    // 3) Resolve target path
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    // 4) Target must be inside user's home directory
     if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 5) Target must exist and be a directory
     struct stat st;
     if (stat(fullPath, &st) < 0 || !S_ISDIR(st.st_mode)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // Update session
+    // 6) Update session current directory
     strncpy(session->currentDir, fullPath, PATH_SIZE);
-    
-    // Calculate display path (relative to home directory)
+
+    // 7) Build display path relative to home directory
     char displayPath[PATH_SIZE];
     size_t homeLen = strlen(session->homeDir);
-    
+
     if (strncmp(session->currentDir, session->homeDir, homeLen) == 0) {
         if (session->currentDir[homeLen] == '\0') {
             strcpy(displayPath, "/");
         } else if (session->currentDir[homeLen] == '/') {
-            snprintf(displayPath, PATH_SIZE, "/%s", session->currentDir + homeLen + 1);
+            snprintf(displayPath, PATH_SIZE, "/%s",
+                     session->currentDir + homeLen + 1);
         } else {
             strcpy(displayPath, "/");
         }
     } else {
         strcpy(displayPath, "/");
     }
-    
-    // Send OK with the new display path
+
+    // 8) Send OK with new display path
     sendOk(clientFd, strlen(displayPath));
     if (strlen(displayPath) > 0) {
         sendAll(clientFd, displayPath, strlen(displayPath));
     }
-    
+
     printf("[CD] OK -> '%s' (display: '%s')\n", fullPath, displayPath);
     return 0;
 }
@@ -744,15 +807,17 @@ int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 // LIST
 // ================================================================
-// ================================================================
-// LIST - POPRAVLJENA VERZIJA
+// FIXED / IMPROVED LIST IMPLEMENTATION
 // ================================================================
 int handleList(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    // Optional UID/GID debug
     //debugWhoAmI("LIST");
 
+    // Print command info for debugging
     debugCommand("LIST", msg, session);
 
+    // 1) User must be logged in
     if (!ensureLoggedIn(clientFd, session, "LIST"))
         return 0;
 
@@ -761,21 +826,21 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     output[0] = '\0';
 
     // ============================================
-    // 1) Odredi putanju koja se lista
+    // 1) Determine directory to list
     // ============================================
     if (msg->arg1[0] == '\0') {
-        // Bez argumenata -> trenutni direktorij
+        // No argument -> current directory
         strncpy(fullPath, session->currentDir, PATH_SIZE);
         fullPath[PATH_SIZE - 1] = '\0';
     }
     else if (msg->arg1[0] == '/') {
-        // Apsolutna putanja unutar root-a
-        // Primjer: /admin -> <rootDir>/admin
-        //          /admin/docs -> <rootDir>/admin/docs
+        // Absolute path inside server root
+        // Example: /admin       -> <rootDir>/admin
+        //          /admin/docs  -> <rootDir>/admin/docs
         snprintf(fullPath, PATH_SIZE, "%s/%s", gRootDir, msg->arg1 + 1);
     }
     else {
-        // Relativna putanja -> koristi resolvePath
+        // Relative path -> resolve against current directory
         if (resolvePath(session, msg->arg1, fullPath) < 0) {
             printf("[LIST] ERROR: resolvePath failed for '%s'\n", msg->arg1);
             sendErrorMsg(clientFd);
@@ -784,8 +849,9 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ============================================
-    // 2) Provjeri da li je putanja unutar root-a
-    // LIST JE JEDINA KOJA MOŽE IZAĆI IZ HOME, ALI NE IZ ROOT-A
+    // 2) Security check: must stay inside server root
+    // LIST is the only command allowed outside home,
+    // but NEVER outside the server root directory
     // ============================================
     if (!isInsideRoot(gRootDir, fullPath)) {
         printf("[LIST] ERROR: Path outside root: '%s'\n", fullPath);
@@ -794,16 +860,15 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ============================================
-    // 3) Provjeri da li direktorij postoji
+    // 3) Check if directory exists
     // ============================================
     struct stat st;
     if (stat(fullPath, &st) < 0) {
-        printf("[LIST] ERROR: stat failed for '%s': %s\n", fullPath, strerror(errno));
+        printf("[LIST] ERROR: stat failed for '%s': %s\n",
+               fullPath, strerror(errno));
         sendErrorMsg(clientFd);
         return 0;
     }
-
-    mode_t mode = st.st_mode;
 
     if (!S_ISDIR(st.st_mode)) {
         printf("[LIST] ERROR: Not a directory: '%s'\n", fullPath);
@@ -811,13 +876,14 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
+    mode_t mode = st.st_mode;
+
     // ============================================
-    // 4) PROVJERA PERMISIJA - KLJUČNA POPRAVKA!
+    // 4) PERMISSION CHECK (KEY FIX)
     // ============================================
-    
-    // Ako je direktorij unutar MOG home-a, gledaj OWNER permisije
+    // If directory is inside user's own home,
+    // check OWNER permissions (r + x)
     if (isInsideHome(session->homeDir, fullPath)) {
-        // Ja sam vlasnik (jer je u mom home-u), gledaj owner permisije
         if (!(mode & S_IRUSR) || !(mode & S_IXUSR)) {
             printf("[LIST] PERMISSION DENIED (owner) for '%s'\n", fullPath);
             sendErrorMsg(clientFd);
@@ -825,8 +891,9 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
         }
     }
     else {
-        // Direktorij je izvan mog home-a (tudji home), gledaj GROUP permisije
-        // Jer svi korisnici su u istoj grupi (csapgroup)
+        // Directory is outside user's home (other users)
+        // All users belong to the same group (csapgroup),
+        // so check GROUP permissions (r + x)
         if (!(mode & S_IRGRP) || !(mode & S_IXGRP)) {
             printf("[LIST] PERMISSION DENIED (group) for '%s'\n", fullPath);
             sendErrorMsg(clientFd);
@@ -835,16 +902,17 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ============================================
-    // 5) OTVORI DIREKTORIJ
+    // 5) Open directory
     // ============================================
     DIR *dir = opendir(fullPath);
     if (!dir) {
-        printf("[LIST] ERROR: opendir failed for '%s': %s\n", fullPath, strerror(errno));
+        printf("[LIST] ERROR: opendir failed for '%s': %s\n",
+               fullPath, strerror(errno));
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // HEADER
+    // Output header
     strcat(output, "============================================================\n");
     strcat(output, "                         CONTENTS                          \n");
     strcat(output, "------------------------------------------------------------\n");
@@ -853,28 +921,30 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
 
     struct dirent *entry;
     int itemCount = 0;
-    
+
     while ((entry = readdir(dir)) != NULL)
     {
-        // Preskoči . i .. i .lock fajlove
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") || strstr(entry->d_name, ".lock") != NULL)
+        // Skip ".", ".." and internal ".lock" files
+        if (!strcmp(entry->d_name, ".") ||
+            !strcmp(entry->d_name, "..") ||
+            strstr(entry->d_name, ".lock") != NULL)
             continue;
 
         char entryPath[PATH_SIZE];
         size_t fp = strlen(fullPath);
         size_t en = strlen(entry->d_name);
 
+        // Skip too-long paths
         if (fp + 1 + en + 1 >= PATH_SIZE)
-            continue; // preskoči preduga imena
+            continue;
 
         memcpy(entryPath, fullPath, fp);
         entryPath[fp] = '/';
         memcpy(entryPath + fp + 1, entry->d_name, en);
         entryPath[fp + 1 + en] = '\0';
 
-        // Stat fajla/direktorijuma
+        // Stat entry
         if (stat(entryPath, &st) < 0) {
-            // Ako stat faila, nastavi sa sljedećim
             continue;
         }
 
@@ -882,34 +952,40 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
         long size  = (long)st.st_size;
         int  isDir = S_ISDIR(st.st_mode);
 
-        // Formatiraj ispis
+        // Format output line
         char line[512];
         if (isDir) {
-            snprintf(line, sizeof(line), " %-30s [DIR]  %04o      %6ld\n",
+            snprintf(line, sizeof(line),
+                     " %-30s [DIR]  %04o      %6ld\n",
                      entry->d_name, perms, size);
         } else {
-            snprintf(line, sizeof(line), " %-30s [FILE] %04o      %6ld\n",
+            snprintf(line, sizeof(line),
+                     " %-30s [FILE] %04o      %6ld\n",
                      entry->d_name, perms, size);
         }
 
-        strncat(output, line, sizeof(output) - strlen(output) - 1);
+        strncat(output, line,
+                sizeof(output) - strlen(output) - 1);
         itemCount++;
     }
 
     closedir(dir);
 
-    // FOOTER
+    // Output footer
     strcat(output, "------------------------------------------------------------\n");
-    
+
     char footer[128];
-    snprintf(footer, sizeof(footer), " Total: %d item(s)\n", itemCount);
+    snprintf(footer, sizeof(footer),
+             " Total: %d item(s)\n", itemCount);
     strcat(output, footer);
-    
+
     strcat(output, "============================================================\n");
 
-    // DEBUG: ispiši šta šaljemo
-    printf("[LIST] OK: Sending %ld bytes for path '%s'\n", strlen(output), fullPath);
+    // Debug: print size of response
+    printf("[LIST] OK: Sending %ld bytes for path '%s'\n",
+           strlen(output), fullPath);
 
+    // Send response
     sendOk(clientFd, strlen(output));
     if (strlen(output) > 0) {
         sendAll(clientFd, output, strlen(output));
@@ -918,18 +994,23 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     return 0;
 }
 
+
 // ================================================================
 // READ  (PDF: read <path>, read -offset=N <path>)
 // ================================================================
 int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    // Optional UID/GID debug
     //debugWhoAmI("READ");
 
+    // Print command details for debugging
     debugCommand("READ", msg, session);
 
+    // 1) User must be logged in
     if (!ensureLoggedIn(clientFd, session, "READ"))
         return 0;
 
+    // 2) Path argument must exist
     if (msg->arg1[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
@@ -937,31 +1018,36 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
 
     char fullPath[PATH_SIZE];
 
+    // 3) Resolve absolute path
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    // 4) Security checks:
+    //    - file must be inside user's home directory
+    //    - file must exist
     if (!isInsideHome(session->homeDir, fullPath) ||
         !fileExists(fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 5) Parse optional offset
     int offset = 0;
     if (msg->arg2[0] != '\0') {
         offset = atoi(msg->arg2);
         if (offset < 0) offset = 0;
     }
 
-    // ⬇⬇⬇ LOCK PRIJE STAT ⬇⬇⬇
+    // ⬇⬇⬇ ACQUIRE LOCK BEFORE STAT (race-condition safe) ⬇⬇⬇
     if (acquireFileLock(fullPath) < 0) {
         printf("[READ] file in use '%s'\n", fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 6) Check file type and size
     struct stat st;
     if (stat(fullPath, &st) < 0 || !S_ISREG(st.st_mode)) {
         releaseFileLock(fullPath);
@@ -970,6 +1056,8 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     int fileSize = (int)st.st_size;
+
+    // Clamp offset to file size
     if (offset > fileSize)
         offset = fileSize;
 
@@ -978,6 +1066,7 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
     char *buffer = NULL;
     int   readBytes = 0;
 
+    // 7) Read file content (if any)
     if (toRead > 0) {
         buffer = malloc(toRead);
         if (!buffer) {
@@ -995,10 +1084,13 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
         }
     }
 
+    // 8) Release file lock
     releaseFileLock(fullPath);
 
+    // 9) Send OK with number of bytes read
     sendOk(clientFd, readBytes);
 
+    // 10) Send file data
     if (readBytes > 0) {
         sendAll(clientFd, buffer, readBytes);
         free(buffer);
@@ -1014,13 +1106,17 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    // Optional UID/GID debug
     //debugWhoAmI("WRITE");
 
+    // Print command details for debugging
     debugCommand("WRITE", msg, session);
 
+    // 1) User must be logged in
     if (!ensureLoggedIn(clientFd, session, "WRITE"))
         return 0;
 
+    // 2) Path argument must exist
     if (msg->arg1[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
@@ -1028,33 +1124,36 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 
     char fullPath[PATH_SIZE];
 
+    // 3) Resolve absolute path
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    // 4) Target must be inside user's home directory
     if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 5) Parse optional offset
     int offset = 0;
     if (msg->arg2[0] != '\0') {
         offset = atoi(msg->arg2);
         if (offset < 0) offset = 0;
     }
 
+    // 6) Acquire exclusive lock on target
     if (acquireFileLock(fullPath) < 0) {
         printf("[WRITE] file in use '%s'\n", fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 1) ACK klijentu
+    // 7) Send ACK to client (ready to receive data)
     sendOk(clientFd, 0);
 
-    // 2) primi size
+    // 8) Receive data size
     int size = 0;
     if (recvAll(clientFd, &size, sizeof(int)) < 0 || size < 0) {
         releaseFileLock(fullPath);
@@ -1064,6 +1163,7 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 
     char *buffer = NULL;
 
+    // 9) Receive data buffer (if size > 0)
     if (size > 0) {
         buffer = malloc(size);
         if (!buffer) {
@@ -1080,37 +1180,43 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
         }
     }
 
-    // ⬇⬇⬇ KLJUČ: piši I kad je size == 0 ⬇⬇⬇
+    // ⬇⬇⬇ KEY POINT: write even when size == 0 (truncate support) ⬇⬇⬇
     int written = fsWriteFile(fullPath, buffer, size, offset);
 
     if (buffer)
         free(buffer);
 
+    // 10) Release lock
     releaseFileLock(fullPath);
 
+    // 11) Check result
     if (written < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 12) Send final OK with number of bytes written
     sendOk(clientFd, written);
     printf("[WRITE] %d bytes -> '%s' (offset=%d)\n",
            written, fullPath, offset);
     return 0;
 }
-
 // ================================================================
 // DELETE (delete file or directory inside user's home)
 // ================================================================
 int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    // Optional UID/GID debug
     //debugWhoAmI("DELETE");
 
+    // Print command details for debugging
     debugCommand("DELETE", msg, session);
 
+    // 1) User must be logged in
     if (!ensureLoggedIn(clientFd, session, "DELETE"))
         return 0;
 
+    // 2) Path argument must exist
     if (msg->arg1[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
@@ -1118,12 +1224,13 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
 
     char fullPath[PATH_SIZE];
 
+    // 3) Resolve absolute path
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    // 4) Target must be inside user's home directory and must exist
     if (!isInsideHome(session->homeDir, fullPath) ||
         !fileExists(fullPath)) {
         sendErrorMsg(clientFd);
@@ -1131,7 +1238,7 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ----------------------------------------
-    // Acquire lock (prevents deleting in-use files)
+    // 5) Acquire lock (prevents deleting in-use files)
     // ----------------------------------------
     if (acquireFileLock(fullPath) < 0) {
         printf("[DELETE] file in use: %s\n", fullPath);
@@ -1140,24 +1247,27 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ----------------------------------------
-    // Delete .lock file if exists
+    // 6) Remove associated ".lock" file if it exists
     // ----------------------------------------
     char lockPath[PATH_SIZE + 10];
     snprintf(lockPath, sizeof(lockPath), "%s.lock", fullPath);
     unlink(lockPath);  // ignore errors
 
     // ----------------------------------------
-    // Delete file or directory recursively
+    // 7) Delete file or directory recursively
     // ----------------------------------------
     int ok = removeRecursive(fullPath);
 
+    // 8) Release lock
     releaseFileLock(fullPath);
 
+    // 9) Check result
     if (ok < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 10) Success
     sendOk(clientFd, 0);
     return 0;
 }
@@ -1167,40 +1277,48 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    // Optional UID/GID debug
     //debugWhoAmI("UPLOAD");
 
+    // Print command details for debugging
     debugCommand("UPLOAD", msg, session);
 
+    // 1) User must be logged in
     if (!ensureLoggedIn(clientFd, session, "UPLOAD"))
         return 0;
 
     char fullPath[PATH_SIZE];
     int size = atoi(msg->arg2);
 
+    // 2) Validate arguments
     if (!msg->arg1[0] || size < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 3) Resolve absolute path
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    // 4) Target must be inside user's home directory
     if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 5) Acquire exclusive lock on target file
     if (acquireFileLock(fullPath) < 0) {
         printf("[UPLOAD] file in use '%s'\n", fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    sendOk(clientFd, 0); // tell client to send data
+    // 6) Acknowledge client and request file data
+    sendOk(clientFd, 0);
 
+    // 7) Receive file content
     char *buffer = malloc(size);
     if (!buffer) {
         releaseFileLock(fullPath);
@@ -1215,16 +1333,19 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
+    // 8) Write received data to file (overwrite)
     int written = fsWriteFile(fullPath, buffer, size, 0);
 
     free(buffer);
     releaseFileLock(fullPath);
 
+    // 9) Check result
     if (written < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 10) Send final OK with number of bytes written
     sendOk(clientFd, written);
     return 0;
 }
@@ -1234,27 +1355,32 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    // Optional UID/GID debug
     //debugWhoAmI("DOWNLOAD");
 
+    // Print command details for debugging
     debugCommand("DOWNLOAD", msg, session);
 
+    // 1) User must be logged in
     if (!ensureLoggedIn(clientFd, session, "DOWNLOAD"))
         return 0;
 
     char fullPath[PATH_SIZE];
 
+    // 2) Validate and resolve path
     if (!msg->arg1[0] ||
         resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // PROMJENA OVDJE: isInsideHome umjesto isInsideRoot
+    // 3) Target must be inside user's home directory
     if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 4) Target must be a regular file
     struct stat st;
     if (stat(fullPath, &st) < 0 || !S_ISREG(st.st_mode)) {
         sendErrorMsg(clientFd);
@@ -1263,12 +1389,14 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 
     int size = (int)st.st_size;
 
+    // 5) Acquire exclusive lock on file
     if (acquireFileLock(fullPath) < 0) {
         printf("[DOWNLOAD] file in use '%s'\n", fullPath);
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 6) Allocate buffer and read file
     char *buffer = malloc(size);
     if (!buffer) {
         releaseFileLock(fullPath);
@@ -1278,14 +1406,17 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 
     int readBytes = fsReadFile(fullPath, buffer, size, 0);
 
+    // 7) Release lock
     releaseFileLock(fullPath);
 
+    // 8) Check read result
     if (readBytes < 0) {
         free(buffer);
         sendErrorMsg(clientFd);
         return 0;
     }
 
+    // 9) Send file size and content to client
     sendOk(clientFd, readBytes);
     sendAll(clientFd, buffer, readBytes);
 
@@ -1294,29 +1425,30 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 }
 
 // ================================================================
-// DELETE USER (sa privremenim root-om)
+// DELETE USER (with temporary root privileges)
 // ================================================================
 int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
+    // Optional UID/GID debug
     //debugWhoAmI("DELETE_USER (entry)");
 
-
+    // Print command details for debugging
     debugCommand("DELETE_USER", msg, session);
 
-    // 1) Mora biti odjavljen
+    // 1) User must NOT be logged in
     if (session->isLoggedIn) {
         printf("[DELETE_USER] ERROR: must NOT be logged in\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 2) Username obavezan
+    // 2) Username is required
     if (msg->arg1[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 2.1) NE SMIJE BITI DODATNIH ARGUMENATA
+    // 2.1) No extra arguments allowed
     if (msg->arg2[0] != '\0' || msg->arg3[0] != '\0') {
         sendErrorMsg(clientFd);
         return 0;
@@ -1324,14 +1456,14 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 
     const char *target = msg->arg1;
 
-    // 3) Zaštita
+    // 3) Protection: root user cannot be deleted
     if (strcmp(target, "root") == 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
     // ============================================================
-    // 4) PROVJERI DA LI USER POSTOJI
+    // 4) Check if system user exists
     // ============================================================
     struct passwd *pwd = getpwnam(target);
     if (!pwd) {
@@ -1342,21 +1474,23 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
     char homePath[PATH_SIZE];
     snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, target);
 
+    // Optional debug before privilege escalation
     //debugWhoAmI("DELETE_USER before root");
 
-    // 5) Privremeni root
+    // 5) Temporarily elevate privileges to root
     uid_t old_euid;
     if (elevateToRoot(&old_euid) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
-    //debugWhoAmI("DELETE_USER after root");
 
+    // Optional debug after privilege escalation
+    //debugWhoAmI("DELETE_USER after root");
 
     int error = 0;
 
     // ============================================================
-    // A) userdel -r <user>
+    // A) Delete system user (userdel -r <user>)
     // ============================================================
     {
         pid_t pid = fork();
@@ -1376,16 +1510,16 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ============================================================
-    // B) ukloni /var/mail/<user> ako postoji
+    // B) Remove /var/mail/<user> if it exists
     // ============================================================
     {
         char mailPath[PATH_SIZE];
         snprintf(mailPath, sizeof(mailPath), "/var/mail/%s", target);
-        unlink(mailPath); // ignoriši grešku
+        unlink(mailPath);  // ignore errors
     }
 
     // ============================================================
-    // C) OBRIŠI VIRTUAL HOME U ROOTDIR
+    // C) Remove virtual home directory inside server root
     // ============================================================
     if (fileExists(homePath)) {
         if (removeRecursive(homePath) < 0) {
@@ -1393,11 +1527,13 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
         }
     }
 
-    // 6) Vrati privilegije
+    // 6) Drop root privileges
     dropFromRoot(old_euid);
+
+    // Optional debug after dropping privileges
     //debugWhoAmI("DELETE_USER after drop");
 
-
+    // 7) Final result
     if (error) {
         sendErrorMsg(clientFd);
         return 0;

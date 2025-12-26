@@ -1,38 +1,43 @@
 // src/client/networkClient.c
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
+#include <stdio.h>      // Standard I/O
+#include <stdlib.h>     // exit()
+#include <string.h>     // memset()
+#include <unistd.h>     // close()
+#include <arpa/inet.h>  // inet_pton()
 
-#include "../../include/networkClient.h"
-#include "../../include/network.h"
-#include "../../include/protocol.h"
+#include "../../include/networkClient.h" // Client-side networking API
+#include "../../include/network.h"       // Shared networking helpers
+#include "../../include/protocol.h"      // Protocol definitions
 
 // ------------------------------------------------------------
-// Connect to server
+// Connect to server (client side)
+// Creates a TCP socket and establishes a connection
 // ------------------------------------------------------------
 int connectToServer(const char *ip, int port)
 {
+    // Create TCP socket
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("socket");
         return -1;
     }
 
+    // Prepare server address structure
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
 
     addr.sin_family = AF_INET;
     addr.sin_port   = htons(port);
 
+    // Convert IP address from string to binary form
     if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
         perror("inet_pton");
         close(sock);
         return -1;
     }
 
+    // Establish connection to server
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("connect");
         close(sock);
@@ -44,12 +49,14 @@ int connectToServer(const char *ip, int port)
 
 // ------------------------------------------------------------
 // Reliable send (CLIENT SIDE)
-// Ako veza pukne → ispiši poruku i UGASI cijeli klijent.
+// Sends exactly 'size' bytes over TCP.
+// If the connection is lost, the client terminates.
 // ------------------------------------------------------------
 int sendAll(int sock, const void *buffer, int size)
 {
     int total = 0;
 
+    // Loop until all bytes are sent
     while (total < size) {
         int sent = send(sock, (const char *)buffer + total, size - total, 0);
 
@@ -70,13 +77,15 @@ int sendAll(int sock, const void *buffer, int size)
 }
 
 // ------------------------------------------------------------
-// Reliable recv (CLIENT SIDE)
-// Ako veza pukne → ispiši poruku i UGASI cijeli klijent.
+// Reliable receive (CLIENT SIDE)
+// Receives exactly 'size' bytes over TCP.
+// If the connection is lost, the client terminates.
 // ------------------------------------------------------------
 int recvAll(int sock, void *buffer, int size)
 {
     int total = 0;
 
+    // Loop until all requested bytes are received
     while (total < size) {
         int r = recv(sock, (char *)buffer + total, size - total, 0);
 

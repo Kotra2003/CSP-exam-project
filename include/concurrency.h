@@ -3,22 +3,25 @@
 
 #include "session.h"
 
-#define MAX_LOCKS 128
+#define MAX_LOCKS 128   // Maximum number of lock entries per process
 
+// Per-process lock bookkeeping.
+// Actual mutual exclusion is enforced by kernel-level fcntl locks.
 typedef struct {
-    char path[PATH_SIZE];   // path fajla/direktorijuma koji zaključavamo
-    int fd;                 // file descriptor koji drži fcntl lock
-    int locked;             // 1 ako je lock aktivan u ovom procesu
+    char path[PATH_SIZE];   // Path of the file or directory being locked
+    int fd;                 // File descriptor holding the fcntl lock
+    int locked;             // 1 if the lock is active in this process
 } FileLock;
 
-// Inicijalizacija tabele lock-ova (nije obavezno ako je .bss = 0, ali držimo za svaki slučaj)
+// Initialize the local lock table.
+// Used for clarity and safety.
 void initLocks();
 
-// Ekskluzivni lock za dati path (blokira dok ne postane slobodan).
-// Vraća 0 na uspjeh, -1 na grešku.
+// Acquire a blocking exclusive lock for the given path.
+// The call blocks until the lock becomes available.
 int acquireFileLock(const char *path);
 
-// Oslobađa lock za dati path (ako postoji).
+// Release the lock associated with the given path.
 void releaseFileLock(const char *path);
 
 #endif

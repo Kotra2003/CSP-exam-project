@@ -18,11 +18,11 @@
 #include "../../include/serverCommands.h"
 #include "../../include/session.h"
 
-// Global root dir, koristi se u drugim modulima (fsOps, session, ...)
+// Global root directory, used by other modules (fsOps, session, ...)
 const char *gRootDir = NULL;
 
 // ---------------------------------------------
-// GLOBALS ZA UPRAVLJANJE DJECOM I SHUTDOWN-om
+// GLOBALS FOR CHILD MANAGEMENT AND SHUTDOWN
 // ---------------------------------------------
 #define MAX_CHILDREN 1024
 #define STATUS_FORCE_LOGOUT 99
@@ -33,7 +33,7 @@ static int   childCount = 0;
 static volatile sig_atomic_t shutdownRequested = 0;
 
 // ------------------------------------------------------------
-// SIGCHLD handler — pokupi sve zombie procese
+// SIGCHLD handler — reap zombie processes
 // ------------------------------------------------------------
 static void handleChildSignal(int sig)
 {
@@ -42,7 +42,7 @@ static void handleChildSignal(int sig)
 }
 
 // ------------------------------------------------------------
-// SIGTERM/SIGINT handler — zahtjev za gašenje servera
+// SIGTERM / SIGINT handler — request server shutdown
 // ------------------------------------------------------------
 static void handleShutdownSignal(int sig)
 {
@@ -51,7 +51,7 @@ static void handleShutdownSignal(int sig)
 }
 
 // ------------------------------------------------------------
-// Provjera da li je rootDir kritičan sistemski put
+// Check if rootDir is a dangerous system path
 // ------------------------------------------------------------
 static int isDangerousRoot(const char *dir)
 {
@@ -65,7 +65,7 @@ static int isDangerousRoot(const char *dir)
 }
 
 // ------------------------------------------------------------
-// Osiguraj da root direktorij postoji (ili ga napravi)
+// Ensure root directory exists (or create it)
 // ------------------------------------------------------------
 static int ensureRootDirectory(const char *path)
 {
@@ -89,17 +89,18 @@ static int ensureRootDirectory(const char *path)
 }
 
 // ------------------------------------------------------------
-// Provjeri i kreiraj csapgroup grupu ako ne postoji
+// Check and create csapgroup group if it does not exist
 // ------------------------------------------------------------
 static int ensureCsapGroupExists(void)
 {
     struct group *grp = getgrnam("csapgroup");
     if (grp != NULL) {
-        printf("[INFO] Group 'csapgroup' exists (GID=%d)\n", (int)grp->gr_gid);
+        printf("[INFO] Group 'csapgroup' exists (GID=%d)\n",
+               (int)grp->gr_gid);
         return 0;
     }
 
-    // Kreiraj grupu ako ne postoji (potrebno sudo)
+    // Create group if missing (requires sudo)
     printf("[INFO] Creating group 'csapgroup'...\n");
 
     pid_t pid = fork();
@@ -116,13 +117,14 @@ static int ensureCsapGroupExists(void)
         printf("[INFO] Group 'csapgroup' created successfully\n");
         return 0;
     } else {
-        printf("[WARNING] Failed to create group 'csapgroup'. User creation will fail.\n");
+        printf("[WARNING] Failed to create group 'csapgroup'. "
+               "User creation will fail.\n");
         return -1;
     }
 }
 
 // ------------------------------------------------------------
-// Banner
+// Server banner
 // ------------------------------------------------------------
 static void printBanner(const char *root, const char *ip, int port)
 {
@@ -137,7 +139,7 @@ static void printBanner(const char *root, const char *ip, int port)
 }
 
 // ------------------------------------------------------------
-// Proces koji sluša STDIN server terminala
+// Process that watches server console (STDIN)
 // ------------------------------------------------------------
 static void runConsoleWatcher(pid_t parentPid)
 {
@@ -167,44 +169,52 @@ static void runConsoleWatcher(pid_t parentPid)
 // ------------------------------------------------------------
 int main(int argc, char *argv[])
 {
+    // Disable umask restrictions (permissions are explicit)
     umask(000);
 
     // =====================================================
-    // FLEKSIBILNO PARSIRANJE ARGUMENATA:
+    // FLEXIBLE ARGUMENT PARSING:
     // ./server <root_directory> [<IP>] [<port>]
     // Default: 127.0.0.1:8080
     // =====================================================
 
-    // Default vrednosti
+    // Default values
     const char *rootDir = NULL;
     const char *ip = "127.0.0.1";
     int port = 8080;
 
-    // Minimalno: 1 argument (root_dir)
+    // At least root directory is required
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <root_directory> [<IP>] [<port>]\n", argv[0]);
+        fprintf(stderr,
+                "Usage: %s <root_directory> [<IP>] [<port>]\n", argv[0]);
         fprintf(stderr, "Examples:\n");
-        fprintf(stderr, "  %s /var/myroot           (default: 127.0.0.1:8080)\n", argv[0]);
-        fprintf(stderr, "  %s /var/myroot 192.168.1.100\n", argv[0]);
-        fprintf(stderr, "  %s /var/myroot 0.0.0.0 9090\n", argv[0]);
+        fprintf(stderr,
+                "  %s /var/myroot           "
+                "(default: 127.0.0.1:8080)\n", argv[0]);
+        fprintf(stderr,
+                "  %s /var/myroot 192.168.1.100\n", argv[0]);
+        fprintf(stderr,
+                "  %s /var/myroot 0.0.0.0 9090\n", argv[0]);
         return 1;
     }
 
-    rootDir = argv[1];
+        rootDir = argv[1];
 
-    // Ako ima 3 ili više argumenata, treći je port
+    // If there are 4 or more arguments, the third one is IP and the fourth is port
     if (argc >= 4) {
         port = atoi(argv[3]);
         if (port <= 0 || port > 65535) {
-            fprintf(stderr, "ERROR: Invalid port number: %s (must be 1-65535)\n", argv[3]);
+            fprintf(stderr,
+                    "ERROR: Invalid port number: %s (must be 1-65535)\n",
+                    argv[3]);
             return 1;
         }
-        ip = argv[2]; // Drugi argument je IP
+        ip = argv[2]; // Second argument is IP
     }
-    // Ako ima tačno 3 argumenta
+    // If there are exactly 3 arguments
     else if (argc == 3) {
-        // Provjeri da li je drugi argument IP ili port
-        // Ako je sve brojevi, možda je port
+        // Check whether the second argument is IP or port
+        // If it consists only of digits, assume it is a port
         int allDigits = 1;
         for (int i = 0; argv[2][i] != '\0'; i++) {
             if (!isdigit((unsigned char)argv[2][i])) {
@@ -214,20 +224,22 @@ int main(int argc, char *argv[])
         }
 
         if (allDigits) {
-            // Drugi argument je port, IP ostaje default
+            // Second argument is port, IP remains default
             port = atoi(argv[2]);
             if (port <= 0 || port > 65535) {
-                fprintf(stderr, "ERROR: Invalid port number: %s\n", argv[2]);
+                fprintf(stderr,
+                        "ERROR: Invalid port number: %s\n",
+                        argv[2]);
                 return 1;
             }
         } else {
-            // Drugi argument je IP, port ostaje default
+            // Second argument is IP, port remains default
             ip = argv[2];
         }
     }
-    // argc == 2: koristi default IP i port
+    // argc == 2: use default IP and port
 
-    // Sigurnosna provjera
+    // Safety check: forbid dangerous system paths as root directory
     if (isDangerousRoot(rootDir)) {
         fprintf(stderr,
                 "ERROR: Root directory '%s' is a critical system path.\n",
@@ -235,16 +247,20 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // Set global root directory
     gRootDir = rootDir;
 
+    // Ensure root directory exists (create if missing)
     if (ensureRootDirectory(rootDir) < 0) {
         return 1;
     }
 
-    // Provjeri/kreiraj csapgroup
+    // Ensure csapgroup exists (create if missing)
     ensureCsapGroupExists();
 
-    // Signal handler-i
+    // -----------------------------------------------------
+    // Signal handlers
+    // -----------------------------------------------------
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handleChildSignal;
@@ -262,16 +278,18 @@ int main(int argc, char *argv[])
     sigaction(SIGINT, &saInt, NULL);
 
     // =====================================================
-    // FIX: VALIDACIJA IP-a PRIJE createServerSocket()
-    // inet_pton vraća 0 za "invalid IP" i tada errno nije setovan.
-    // Zato NE SMIJE perror za return==0.
+    // FIX: Validate IP before createServerSocket()
+    // inet_pton returns 0 for invalid IP and does NOT set errno.
+    // Therefore perror must NOT be used for return == 0.
     // =====================================================
     {
         struct in_addr tmp;
         int ok = inet_pton(AF_INET, ip, &tmp);
 
         if (ok == 0) {
-            fprintf(stderr, "FATAL: Invalid IPv4 address: %s\n", ip);
+            fprintf(stderr,
+                    "FATAL: Invalid IPv4 address: %s\n",
+                    ip);
             return 1;
         }
         if (ok < 0) {
@@ -280,13 +298,18 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Kreiraj server socket
+    // Create server socket
     int serverFd = createServerSocket(ip, port);
     if (serverFd < 0) {
-        fprintf(stderr, "FATAL: Could not bind to %s:%d\n", ip, port);
+        fprintf(stderr,
+                "FATAL: Could not bind to %s:%d\n",
+                ip, port);
         return 1;
     }
 
+    // -----------------------------------------------------
+    // Drop root privileges after binding
+    // -----------------------------------------------------
     uid_t target_uid;
     gid_t target_gid;
 
@@ -297,7 +320,7 @@ int main(int argc, char *argv[])
         target_uid = (uid_t)atoi(su);
         target_gid = (gid_t)atoi(sg);
     } else {
-        // Ako NIJE pokrenuto sa sudo
+        // Not started via sudo
         target_uid = getuid();
         target_gid = getgid();
     }
@@ -314,53 +337,57 @@ int main(int argc, char *argv[])
     }
 
     printf("[SECURITY] Runtime ruid=%d euid=%d target=%d\n",
-       getuid(), geteuid(), target_uid);
+           getuid(), geteuid(), target_uid);
 
-
-
+    // Print server banner
     printBanner(rootDir, ip, port);
 
-    // Console watcher proces
+    // -----------------------------------------------------
+    // Console watcher process
+    // -----------------------------------------------------
     pid_t consolePid = fork();
     if (consolePid == 0) {
         runConsoleWatcher(getppid());
     }
 
     // =====================================================
-    // POLL IMPLEMENTACIJA
+    // POLL-BASED ACCEPT LOOP
     // =====================================================
     struct pollfd pfds[1];
     pfds[0].fd = serverFd;
     pfds[0].events = POLLIN;
 
-    int pollTimeout = 1000; // 1 sekund (u milisekundama)
+    int pollTimeout = 1000; // 1 second (milliseconds)
 
-    // Accept loop sa poll()
+    // Accept loop using poll()
     while (!shutdownRequested) {
         int pollRet = poll(pfds, 1, pollTimeout);
 
         if (pollRet < 0) {
-            if (errno == EINTR) continue; // Signal primljen
+            if (errno == EINTR)
+                continue; // Interrupted by signal
             perror("poll");
             break;
         }
 
         if (pollRet == 0) {
-            // Timeout - proveri da li je shutdown zahtevan
+            // Timeout: just re-check shutdown flag
             continue;
         }
 
-        // Ima nova konekcija
+        // Incoming connection
         if (pfds[0].revents & POLLIN) {
             int clientFd = acceptClient(serverFd);
 
             if (shutdownRequested) {
-                if (clientFd >= 0) close(clientFd);
+                if (clientFd >= 0)
+                    close(clientFd);
                 break;
             }
 
             if (clientFd < 0) {
-                if (errno == EINTR) continue;
+                if (errno == EINTR)
+                    continue;
                 perror("acceptClient");
                 continue;
             }
@@ -368,6 +395,7 @@ int main(int argc, char *argv[])
             pid_t pid = fork();
 
             if (pid == 0) {
+                // Child: handle client
                 close(serverFd);
 
                 Session session;
@@ -393,6 +421,7 @@ int main(int argc, char *argv[])
                 _exit(0);
             }
 
+            // Parent: track child and close client FD
             if (childCount < MAX_CHILDREN)
                 children[childCount++] = pid;
 
@@ -405,14 +434,14 @@ int main(int argc, char *argv[])
     close(serverFd);
     kill(consolePid, SIGKILL);
 
-    // Ubij sve klijente koji su još živi
+    // Terminate all active client handlers
     for (int i = 0; i < childCount; i++) {
         if (children[i] > 0) {
             kill(children[i], SIGTERM);
         }
     }
 
-    // Sačekaj da sva deca završe
+    // Wait for all children to exit
     while (waitpid(-1, NULL, 0) > 0) {}
 
     printf("[SHUTDOWN] All client handlers terminated.\n");

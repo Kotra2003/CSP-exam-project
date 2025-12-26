@@ -4,25 +4,30 @@
 #define USERNAME_SIZE 64
 #define PATH_SIZE     4096
 
-// Represents per-client session state
+// Represents per-client session state.
+// Stored server-side and associated with a single client connection.
 typedef struct {
-    int  isLoggedIn;                 // 1 if user authenticated
-    char username[USERNAME_SIZE];    // logged-in username
-    char homeDir[PATH_SIZE];         // absolute path to user's home directory
-    char currentDir[PATH_SIZE];      // current working directory (always inside homeDir)
+    int  isLoggedIn;                 // 1 if the user is authenticated
+    char username[USERNAME_SIZE];    // Logged-in username
+    char homeDir[PATH_SIZE];         // Absolute path to user's home directory
+    char currentDir[PATH_SIZE];      // Current working directory (inside homeDir)
 } Session;
 
-// Initialize an empty session
+// Initialize an empty session structure.
+// Called when a new client connection is created.
 void initSession(Session *s);
 
-// Log in a user (sets username, homeDir, currentDir)
+// Log in a user and initialize session paths.
+// Sets username, homeDir and currentDir.
 int loginUser(Session *s, const char *rootDir, const char *username);
 
-// Change current working directory (NOT sandbox-checked here)
+// Update the current working directory.
+// Assumes the path has already been validated.
 int changeDirectory(Session *s, const char *newAbsPath);
 
-// Build absolute path from user input (does NOT handle sandboxing)
-// Used internally — full checking happens in fsOps
+// Build an absolute path from user input.
+// This function does not enforce sandboxing;
+// final validation is performed in fsOps.
 int buildFullPath(Session *s, const char *userPath, char *outputPath);
 
 #endif

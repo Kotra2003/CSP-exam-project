@@ -4,32 +4,33 @@
 #include "protocol.h"
 #include "session.h"
 
-// Process a client command.
-// Returns 1 if server should close connection, 0 otherwise.
+// Dispatch and process a single client command.
+// Sends the response to the client.
+// Returns 1 if the connection should be closed, 0 otherwise.
 int processCommand(int clientFd, ProtocolMessage *msg, Session *session);
 
-// Authentication
+// Authentication and session management
 int handleLogin(int clientFd, ProtocolMessage *msg, Session *session);
 int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session);
 
-// User management (naš dodatak)
+// User management extension (custom feature)
 int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session);
 
-// File / directory management
+// File and directory management commands
 int handleCreate(int clientFd, ProtocolMessage *msg, Session *session);
 int handleChmod(int clientFd, ProtocolMessage *msg, Session *session);
 int handleMove(int clientFd, ProtocolMessage *msg, Session *session);
 int handleDelete(int clientFd, ProtocolMessage *msg, Session *session);
 
-// Navigation
+// Directory navigation and listing
 int handleCd(int clientFd, ProtocolMessage *msg, Session *session);
 int handleList(int clientFd, ProtocolMessage *msg, Session *session);
 
-// File I/O
+// File I/O operations
 int handleRead(int clientFd, ProtocolMessage *msg, Session *session);
 int handleWrite(int clientFd, ProtocolMessage *msg, Session *session);
 
-// File Transfer
+// File transfer operations
 int handleUpload(int clientFd, ProtocolMessage *msg, Session *session);
 int handleDownload(int clientFd, ProtocolMessage *msg, Session *session);
 

@@ -6,10 +6,13 @@
 
 #include "../../include/concurrency.h"
 
+// Local lock table (per-process)
+// Real locking is done by kernel via fcntl()
 static FileLock locks[MAX_LOCKS];
 
 // ------------------------------------------------------------
-// Init lock table (opciono, ali OK za jasnoću)
+// Initialize lock table
+// (Optional, but keeps state explicit and clean)
 // ------------------------------------------------------------
 void initLocks()
 {
@@ -20,17 +23,20 @@ void initLocks()
     }
 }
 
-// Vrati postojeći ulaz za path ili kreiraj novi
+// ------------------------------------------------------------
+// Return existing lock entry for a path,
+// or create a new one if it does not exist
+// ------------------------------------------------------------
 static FileLock* getLockEntry(const char *path)
 {
-    // 1) Traži postojeći
+    // 1) Look for an existing entry
     for (int i = 0; i < MAX_LOCKS; i++) {
         if (locks[i].path[0] != '\0' && strcmp(locks[i].path, path) == 0) {
             return &locks[i];
         }
     }
 
-    // 2) Nađi prazan slot
+    // 2) Find a free slot
     for (int i = 0; i < MAX_LOCKS; i++) {
         if (locks[i].path[0] == '\0') {
             strncpy(locks[i].path, path, PATH_SIZE);
@@ -41,15 +47,14 @@ static FileLock* getLockEntry(const char *path)
         }
     }
 
-    // Nema mjesta
+    // No free slot available
     return NULL;
 }
 
 // ------------------------------------------------------------
-// Ekskluzivni BLOKING lock na "pravom" fajlu:
-//  - ako je path regularan fajl ili ne postoji → zaključavamo baš taj fajl
-//    (kreiramo ga ako ne postoji)
-//  - ako je path direktorijum → zaključavamo path+".lock" (jer dir ne možeš otvoriti O_RDWR)
+// Acquire EXCLUSIVE blocking lock for a path
+//  - Regular file or non-existing path → lock the file itself
+//  - Directory → lock a helper "<dir>.lock" file
 // ------------------------------------------------------------
 int acquireFileLock(const char *path)
 {
@@ -58,7 +63,7 @@ int acquireFileLock(const char *path)
     FileLock *l = getLockEntry(path);
     if (!l) return -1;
 
-    // Ako već imamo lock u ovom procesu → OK
+    // Already locked in this process
     if (l->locked) {
         return 0;
     }
@@ -66,6 +71,7 @@ int acquireFileLock(const char *path)
     struct stat st;
     int isDir = 0;
 
+    // Detect if path is a directory
     if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
         isDir = 1;
     }
@@ -74,37 +80,39 @@ int acquireFileLock(const char *path)
     const char *targetPath = path;
 
     if (isDir) {
-        // Za direktorijume koristimo pomoćni ".lock" fajl
+        // Directories cannot be opened O_RDWR → use helper file
         snprintf(lockPath, sizeof(lockPath), "%s.lock", path);
         targetPath = lockPath;
     }
 
+    // Open (or create) lock target
     int fd = open(targetPath, O_CREAT | O_RDWR, 0700);
     if (fd < 0) {
         perror("open lock target");
         return -1;
     }
 
+    // Prepare exclusive write lock
     struct flock fl;
     memset(&fl, 0, sizeof(fl));
-    fl.l_type   = F_WRLCK;      // ekskluzivni lock
+    fl.l_type   = F_WRLCK;     // Exclusive lock
     fl.l_whence = SEEK_SET;
 
-    // BLOCKING: čeka dok neko drugi ne pusti lock
+    // BLOCKING lock: waits until lock becomes available
     if (fcntl(fd, F_SETLKW, &fl) < 0) {
         perror("fcntl(F_SETLKW)");
         close(fd);
         return -1;
     }
 
-    // Uspjeh
+    // Lock successfully acquired
     l->fd     = fd;
     l->locked = 1;
     return 0;
 }
 
 // ------------------------------------------------------------
-// Oslobađanje lock-a
+// Release lock for a given path
 // ------------------------------------------------------------
 void releaseFileLock(const char *path)
 {
@@ -115,16 +123,18 @@ void releaseFileLock(const char *path)
         return;
     }
 
+    // Prepare unlock operation
     struct flock fl;
     memset(&fl, 0, sizeof(fl));
     fl.l_type   = F_UNLCK;
     fl.l_whence = SEEK_SET;
 
-    // Oslobodi lock (ignorišemo grešku)
+    // Release lock (ignore errors)
     fcntl(l->fd, F_SETLK, &fl);
     close(l->fd);
 
-    l->fd     = -1;
-    l->locked = 0;
+    // Reset local lock state
+    l->fd      = -1;
+    l->locked  = 0;
     l->path[0] = '\0';
 }

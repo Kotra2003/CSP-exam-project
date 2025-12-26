@@ -3,13 +3,15 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <dirent.h>   // za opendir/readdir
+#include <dirent.h>   // for opendir / readdir
 #include <unistd.h>
 
 #include "../../include/utils.h"
 #include "../../include/session.h"
 
-// Remove newline at the end of a string (if exists)
+// ------------------------------------------------------------
+// Remove trailing newline from a string (if present)
+// ------------------------------------------------------------
 void removeNewline(char *str)
 {
     int len = strlen(str);
@@ -18,7 +20,9 @@ void removeNewline(char *str)
     }
 }
 
-// Check if a string contains only digits
+// ------------------------------------------------------------
+// Check if string contains only numeric digits
+// ------------------------------------------------------------
 int isNumeric(const char *str)
 {
     if (!str || *str == '\0')
@@ -31,10 +35,12 @@ int isNumeric(const char *str)
     return 1;
 }
 
-// Safely join two paths
+// ------------------------------------------------------------
+// Safely join two filesystem paths
+// NOTE: Caller must ensure output buffer is large enough
+// ------------------------------------------------------------
 void joinPaths(const char *base, const char *child, char *output)
 {
-    // Caller ensures output buffer is big enough
     if (child[0] == '\0') {
         snprintf(output, PATH_SIZE, "%s", base);
     } else {
@@ -42,13 +48,17 @@ void joinPaths(const char *base, const char *child, char *output)
     }
 }
 
-// Simple random ID
+// ------------------------------------------------------------
+// Generate a simple random identifier
+// ------------------------------------------------------------
 int generateId()
 {
     return rand() % 1000000;
 }
 
-// Check if file/directory exists
+// ------------------------------------------------------------
+// Check whether a file or directory exists
+// ------------------------------------------------------------
 int fileExists(const char *path)
 {
     struct stat st;
@@ -57,12 +67,12 @@ int fileExists(const char *path)
 
 // =======================================================
 // removeRecursive
-//   Rekurzivno briše fajl ili direktorij (kao "rm -rf").
-//   Koristi se za brisanje korisničkog home-a u rootDir.
+//   Recursively removes a file or directory (similar to rm -rf)
+//   Used for deleting user home directories inside rootDir
 // =======================================================
 int removeRecursive(const char *path)
 {
-    // Remove associated .lock file if present
+    // Remove associated .lock file if it exists
     char lockFile[PATH_SIZE + 10];
     snprintf(lockFile, sizeof(lockFile), "%s.lock", path);
     unlink(lockFile); // ignore errors
@@ -73,7 +83,7 @@ int removeRecursive(const char *path)
         return -1;
     }
 
-    // Ako nije direktorij → obriši kao običan fajl
+    // If not a directory → remove as a regular file
     if (!S_ISDIR(st.st_mode)) {
         if (unlink(path) < 0) {
             perror("unlink");
@@ -82,7 +92,7 @@ int removeRecursive(const char *path)
         return 0;
     }
 
-    // Direktorij → iteriraj kroz sadržaj
+    // Directory → iterate over contents
     DIR *dir = opendir(path);
     if (!dir) {
         perror("opendir");
@@ -93,19 +103,22 @@ int removeRecursive(const char *path)
     char childPath[PATH_SIZE];
 
     while ((entry = readdir(dir)) != NULL) {
+        // Skip "." and ".."
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
             continue;
 
         snprintf(childPath, PATH_SIZE, "%s/%s", path, entry->d_name);
+
         if (removeRecursive(childPath) < 0) {
-            // nastavljamo pokušavati dalje, ali prijavimo grešku
-            // možeš ovdje dodati dodatni logging ako želiš
+            // Continue attempting deletion even if one entry fails
+            // Additional logging could be added here if needed
             continue;
         }
     }
 
     closedir(dir);
 
+    // Remove the now-empty directory
     if (rmdir(path) < 0) {
         perror("rmdir");
         return -1;
