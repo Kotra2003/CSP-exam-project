@@ -14,7 +14,6 @@
 
 #include "../../include/network.h"
 #include "../../include/protocol.h"
-#include "../../include/concurrency.h"
 #include "../../include/serverCommands.h"
 #include "../../include/session.h"
 

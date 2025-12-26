@@ -7,11 +7,12 @@
 #include <errno.h>
 #include <limits.h>
 #include <libgen.h>
+#include <sys/file.h>
 
 #include "../../include/fsOps.h"
 #include "../../include/utils.h"
 
-// Global root directory (defined elsewhere)
+// Global root directory (defined in serverMain.c)
 extern const char *gRootDir;
 
 // ============================================================
@@ -233,7 +234,6 @@ int isInsideRoot(const char *rootDir, const char *fullPath)
     return 0;
 }
 
-
 // ============================================================
 // Check if path is inside user's home directory
 // Used for permission / sandbox validation
@@ -304,6 +304,7 @@ int fsMove(const char *src, const char *dst)
 
 // ============================================================
 // READ file with shared (read) lock
+// NOTE: Caller must lock the file before calling this!
 // ============================================================
 int fsReadFile(const char *path, char *buffer, int size, int offset)
 {
@@ -312,15 +313,8 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
     if (fd < 0)
         return -1;
 
-    // Acquire shared lock
-    if (lockFileRead(fd) < 0) {
-        close(fd);
-        return -1;
-    }
-
     // Move to requested offset
     if (lseek(fd, offset, SEEK_SET) < 0) {
-        unlockFile(fd);
         close(fd);
         return -1;
     }
@@ -328,8 +322,7 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
     // Read data
     int r = read(fd, buffer, size);
 
-    // Release lock and cleanup
-    unlockFile(fd);
+    // Cleanup
     close(fd);
 
     return r;
@@ -337,6 +330,7 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
 
 // ============================================================
 // WRITE file with exclusive (write) lock
+// NOTE: Caller must lock the file before calling this!
 // Supports create, overwrite, and offset writes
 // ============================================================
 int fsWriteFile(const char *path, const char *data, int size, int offset)
@@ -365,18 +359,11 @@ int fsWriteFile(const char *path, const char *data, int size, int offset)
             return -1;
     }
 
-    // Acquire exclusive lock
-    if (lockFileWrite(fd) < 0) {
-        close(fd);
-        return -1;
-    }
-
     /*
      * offset == 0 means overwrite (truncate file)
      */
     if (offset == 0) {
         if (ftruncate(fd, 0) < 0) {
-            unlockFile(fd);
             close(fd);
             return -1;
         }
@@ -384,7 +371,6 @@ int fsWriteFile(const char *path, const char *data, int size, int offset)
 
     // Move to requested offset
     if (lseek(fd, offset, SEEK_SET) < 0) {
-        unlockFile(fd);
         close(fd);
         return -1;
     }
@@ -394,16 +380,13 @@ int fsWriteFile(const char *path, const char *data, int size, int offset)
     if (size > 0) {
         written = write(fd, data, size);
         if (written < 0) {
-            unlockFile(fd);
             close(fd);
             return -1;
         }
     }
 
-    // Release lock and cleanup
-    unlockFile(fd);
+    // Cleanup
     close(fd);
 
     return written;
 }
-
