@@ -148,6 +148,7 @@ static void runConsoleWatcher(pid_t parentPid)
     fflush(stdout);
 
     while (fgets(line, sizeof(line), stdin) != NULL) {
+        //We need this becase exit and exit\n is not the same
         size_t len = strlen(line);
         if (len > 0 && line[len - 1] == '\n')
             line[len - 1] = '\0';
@@ -169,6 +170,7 @@ static void runConsoleWatcher(pid_t parentPid)
 int main(int argc, char *argv[])
 {
     // Disable umask restrictions (permissions are explicit)
+    // I had a problem with write and create so I needed to add it
     umask(000);
 
     // =====================================================
@@ -188,12 +190,12 @@ int main(int argc, char *argv[])
                 "Usage: %s <root_directory> [<IP>] [<port>]\n", argv[0]);
         fprintf(stderr, "Examples:\n");
         fprintf(stderr,
-                "  %s /var/myroot           "
+                "  %s /root_direcotry           "
                 "(default: 127.0.0.1:8080)\n", argv[0]);
         fprintf(stderr,
-                "  %s /var/myroot 192.168.1.100\n", argv[0]);
+                "  %s /root_direcotry 192.168.1.100\n", argv[0]);
         fprintf(stderr,
-                "  %s /var/myroot 0.0.0.0 9090\n", argv[0]);
+                "  %s /root_direcotry 0.0.0.0 9090\n", argv[0]);
         return 1;
     }
 
@@ -298,6 +300,7 @@ int main(int argc, char *argv[])
     }
 
     // Create server socket
+    // Just used to wait for clients
     int serverFd = createServerSocket(ip, port);
     if (serverFd < 0) {
         fprintf(stderr,

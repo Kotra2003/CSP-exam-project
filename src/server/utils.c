@@ -37,7 +37,6 @@ int isNumeric(const char *str)
 
 // ------------------------------------------------------------
 // Safely join two filesystem paths
-// NOTE: Caller must ensure output buffer is large enough
 // ------------------------------------------------------------
 void joinPaths(const char *base, const char *child, char *output)
 {
@@ -66,7 +65,7 @@ int fileExists(const char *path)
 }
 
 // =======================================================
-// removeRecursive
+//   removeRecursive
 //   Recursively removes a file or directory (similar to rm -rf)
 //   Used for deleting user home directories inside rootDir
 // =======================================================
@@ -110,8 +109,6 @@ int removeRecursive(const char *path)
         snprintf(childPath, PATH_SIZE, "%s/%s", path, entry->d_name);
 
         if (removeRecursive(childPath) < 0) {
-            // Continue attempting deletion even if one entry fails
-            // Additional logging could be added here if needed
             continue;
         }
     }

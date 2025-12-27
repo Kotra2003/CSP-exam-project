@@ -359,7 +359,7 @@ static void startBackgroundUpload(const char *local, const char *remote)
     signal(SIGINT, SIG_IGN);
     signal(SIGTERM, SIG_IGN);
 
-    // Demo delay to clearly show background execution
+    // Just to not finish imidiatly so we can try exit
     printf(YELLOW "[BG PID=%d] Starting upload in 5 seconds...\n" RESET, getpid());
     sleep(5);
 
@@ -424,7 +424,7 @@ static void startBackgroundDownload(const char *remote, const char *local)
     signal(SIGINT, SIG_IGN);
     signal(SIGTERM, SIG_IGN);
 
-    // Demo delay to make background execution visible
+    // Just to have enogh time to try exit or any other command
     printf(YELLOW "[BG PID=%d] Starting download in 5 seconds...\n" RESET, getpid());
     sleep(5);
 
@@ -683,7 +683,7 @@ int clientHandleInput(int sock, char *input)
         return 0;
     }
 
-        // -----------------------------------------------------------
+    // -----------------------------------------------------------
     // READ command
     // Supports optional offset parameter
     // -----------------------------------------------------------

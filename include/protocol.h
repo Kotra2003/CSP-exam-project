@@ -1,6 +1,8 @@
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 
+#define MAX_FILE_SIZE (100 * 1024 * 1024) // 100 MB
+
 // ==============================
 // Command identifiers
 // Each value represents a client request type
@@ -18,7 +20,7 @@
 #define CMD_WRITE          10   // Write to file
 #define CMD_UPLOAD         11   // Upload file from client to server
 #define CMD_DOWNLOAD       12   // Download file from server to client
-#define CMD_TRANSFER_REQ   13   // Reserved for advanced transfer features
+
 #define CMD_DELETE_USER    14   // Custom extension: delete user
 
 // ==============================
@@ -39,8 +41,8 @@
 // ==============================
 typedef struct {
     int command;            // Command identifier (CMD_*)
-    int hasOptions;         // Reserved for future options
-    int optionValue;        // Reserved for future options
+    int hasOptions;         
+    int optionValue;        
     char arg1[ARG_SIZE];    // First argument (e.g. path, username)
     char arg2[ARG_SIZE];    // Second argument
     char arg3[ARG_SIZE];    // Third argument (if needed)

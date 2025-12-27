@@ -67,9 +67,9 @@ int unlockFile(int fd)
 // ============================================================
 
 // Normalize path:
-//  - removes ".", ".."
-//  - removes duplicate slashes
-//  - keeps absolute/relative form
+// removes ".", ".."
+// removes duplicate slashes
+// keeps absolute/relative form
 static char* normalize_path(const char *path, char *normalized, size_t size)
 {
     if (!path || !normalized || size == 0)
@@ -168,7 +168,7 @@ int resolvePath(Session *s, const char *inputPath, char *outputPath)
         snprintf(result, PATH_SIZE, "%s%s", gRootDir, inputPath);
     }
     else {
-        // Relative path → append to base safely
+        // Relative path append to base safely
         size_t base_len  = strlen(base);
         size_t input_len = strlen(inputPath);
 
@@ -274,7 +274,7 @@ int fsCreate(const char *path, int permissions, int isDirectory)
         if (mkdir(path, permissions) < 0)
             return -1;
     }
-    // Create regular file (fail if already exists)
+    // Create regular file
     else {
         int fd = open(path, O_CREAT | O_EXCL, permissions);
         if (fd < 0)
@@ -304,7 +304,6 @@ int fsMove(const char *src, const char *dst)
 
 // ============================================================
 // READ file with shared (read) lock
-// NOTE: Caller must lock the file before calling this!
 // ============================================================
 int fsReadFile(const char *path, char *buffer, int size, int offset)
 {
@@ -330,21 +329,14 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
 
 // ============================================================
 // WRITE file with exclusive (write) lock
-// NOTE: Caller must lock the file before calling this!
-// Supports create, overwrite, and offset writes
 // ============================================================
 int fsWriteFile(const char *path, const char *data, int size, int offset)
 {
     int fd;
-
-    /*
-     * Try to ATOMICALLY create the file.
-     * If successful → file is new.
-     */
     fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0700);
 
     if (fd >= 0) {
-        // New file: fix permissions (umask-safe)
+        // New file: fix permissions
         if (fchmod(fd, 0700) < 0) {
             close(fd);
             return -1;
@@ -359,9 +351,9 @@ int fsWriteFile(const char *path, const char *data, int size, int offset)
             return -1;
     }
 
-    /*
-     * offset == 0 means overwrite (truncate file)
-     */
+    
+    // offset == 0 means overwrite 
+    
     if (offset == 0) {
         if (ftruncate(fd, 0) < 0) {
             close(fd);

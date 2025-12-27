@@ -25,6 +25,9 @@ extern const char *gRootDir;
 
 // ================================================================
 // Debug helper: print real/effective UID and GID
+// It's not used right now but it's easy to use
+// I used it just to check which euid is being used in wich handler
+// and if it's being droped correctly
 // ================================================================
 static inline void debugWhoAmI(const char *where)
 {
@@ -75,6 +78,8 @@ static int ensureLoggedIn(int clientFd, Session *session, const char *cmdName)
 }
 
 // Print debug information about received command
+// It's called debug commands but I use it all the time just because it's
+// nicer to see evrything that is happening between server and client
 static void debugCommand(const char *name, ProtocolMessage *msg, Session *s)
 {
     printf("[%s] cmd=%d, arg1='%s', arg2='%s', arg3='%s', loggedIn=%d\n",
@@ -123,6 +128,8 @@ static int becomeLoggedUser(const char *username)
         return -1;
     }
 
+    // Used just to check if the user and the group exists
+    // If there is no info of user or group we don't allowe switching to that user
     struct passwd *pwd = getpwnam(username);
     struct group  *grp = getgrnam("csapgroup");
 
@@ -132,6 +139,7 @@ static int becomeLoggedUser(const char *username)
     }
 
     // Set effective group ID
+    // From now on process that is representing user on server side is inside csapgroup
     if (setegid(grp->gr_gid) != 0) {
         perror("[LOGIN] setegid failed");
         dropFromRoot(old_euid);
@@ -139,6 +147,7 @@ static int becomeLoggedUser(const char *username)
     }
 
     // Initialize supplementary groups for user
+    // It works without sometimes but there is chance it can fail if we don't init all other gruops of user
     if (initgroups(username, grp->gr_gid) != 0) {
         perror("[LOGIN] initgroups failed");
         dropFromRoot(old_euid);
@@ -146,6 +155,7 @@ static int becomeLoggedUser(const char *username)
     }
 
     // Drop privileges to logged-in user
+    // So now we are sure that this server-child process has only premission of logged user
     if (seteuid(pwd->pw_uid) != 0) {
         perror("[LOGIN] seteuid(user) failed");
         dropFromRoot(old_euid);
@@ -222,6 +232,7 @@ int handleLogin(int clientFd, ProtocolMessage *msg, Session *session)
     debugCommand("LOGIN", msg, session);
 
     // Prevent double login
+    // This dosen't mean that you can't login to same user on diff terminal
     if (session->isLoggedIn) {
         printf("[LOGIN] ERROR: already logged in.\n");
         sendErrorMsg(clientFd);
@@ -253,6 +264,8 @@ int handleLogin(int clientFd, ProtocolMessage *msg, Session *session)
     // Drop root privileges immediately
     dropFromRoot(old_euid);
 
+    // This should only happen if we delete virtual home directory of user 
+    // but we don't delete real system user
     if (!exists) {
         printf("[LOGIN] ERROR: no such user dir '%s'\n", homePath);
         sendErrorMsg(clientFd);
@@ -293,7 +306,7 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     debugCommand("CREATE_USER", msg, session);
 
     // ------------------------------------------------------------
-    // 1) Validate arguments
+    // Validate arguments
     // ------------------------------------------------------------
     if (msg->arg1[0] == '\0' || msg->arg2[0] == '\0') {
         sendErrorMsg(clientFd);
@@ -304,7 +317,7 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     const char *permStr  = msg->arg2;
 
     // ------------------------------------------------------------
-    // 2) Validate username format
+    // Validate username format
     // ------------------------------------------------------------
     {
         size_t len = strlen(username);
@@ -327,7 +340,7 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ------------------------------------------------------------
-    // 3) Validate permissions (octal 0–777)
+    // Validate permissions (octal 0–777)
     // ------------------------------------------------------------
     char *endptr = NULL;
     long perms = strtol(permStr, &endptr, 8);
@@ -342,13 +355,13 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     int permissions = (int)perms;
 
     // ------------------------------------------------------------
-    // 4) Compute virtual home path
+    // Compute virtual home path
     // ------------------------------------------------------------
     char homePath[PATH_SIZE];
     snprintf(homePath, sizeof(homePath), "%s/%s", gRootDir, username);
 
     // ------------------------------------------------------------
-    // 5) Elevate privileges (root required)
+    // Elevate privileges (root required)
     // ------------------------------------------------------------
     uid_t old_euid;
     if (elevateToRoot(&old_euid) < 0) {
@@ -361,7 +374,7 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     int homeCreated = 0;   // Home directory created in this call
 
     // ------------------------------------------------------------
-    // 6) Hard checks (no auto-cleanup here)
+    // Hard checks 
     // ------------------------------------------------------------
     if (getpwnam(username) != NULL) {
         error = 1; // System user already exists
@@ -372,7 +385,7 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ------------------------------------------------------------
-    // 7) Create system user (without /home)
+    // Create system user (without /home)
     // ------------------------------------------------------------
     if (!error) {
         pid_t pid = fork();
@@ -384,7 +397,7 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
                    "--no-create-home",
                    username,
                    NULL);
-            _exit(127);
+            _exit(127); // We user 127 because it means command was not executed correctly
         } else if (pid < 0) {
             error = 1;
         } else {
@@ -399,7 +412,7 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ------------------------------------------------------------
-    // 8) Create virtual home directory
+    // Create virtual home directory
     // ------------------------------------------------------------
     if (!error) {
         if (mkdir(homePath, (mode_t)permissions) < 0) {
@@ -410,7 +423,7 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ------------------------------------------------------------
-    // 9) Set ownership and permissions
+    // Set ownership and permissions
     // ------------------------------------------------------------
     if (!error) {
         struct passwd *pwd = getpwnam(username);
@@ -424,7 +437,7 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ------------------------------------------------------------
-    // 10) Rollback (only what was created here)
+    // Rollback (only what was created here)
     // ------------------------------------------------------------
     if (error) {
         // Remove virtual home if created
@@ -445,7 +458,7 @@ int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ------------------------------------------------------------
-    // 11) Drop root privileges
+    // Drop root privileges
     // ------------------------------------------------------------
     dropFromRoot(old_euid);
 
@@ -501,28 +514,28 @@ int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
     // "-d" means directory, otherwise create file
     int isDir = (strcmp(typeArg, "-d") == 0);
 
-    // 3) Resolve absolute filesystem path
+    // Resolve absolute filesystem path
     char fullPath[PATH_SIZE];
     if (resolvePath(session, pathArg, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 4) Security checks:
-    //    - must be inside user's home directory
-    //    - target must not already exist
+    // Security checks:
+    // must be inside user's home directory
+    // target must not already exist
     if (!isInsideHome(session->homeDir, fullPath) || fileExists(fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 5) Create file or directory
+    // Create file or directory
     if (fsCreate(fullPath, permissions, isDir) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 6) Success
+    // Success
     sendOk(clientFd, 0);
     return 0;
 }
@@ -530,27 +543,24 @@ int handleCreate(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 // CHMOD
 // ================================================================
-// ================================================================
-// CHMOD (podrška za i fajlove i direktorijume)
-// ================================================================
 int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("CHMOD", msg, session);
 
-    // 1) User must be logged in
+    // User must be logged in
     if (!ensureLoggedIn(clientFd, session, "CHMOD")) {
         printf("[CHMOD DEBUG] Not logged in\n");
         return 0;
     }
 
-    // 2) Arguments must exist
+    // Arguments must exist
     if (msg->arg1[0] == '\0' || msg->arg2[0] == '\0') {
         printf("[CHMOD DEBUG] Missing arguments\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 3) Validate permissions (octal 0–777)
+    // Validate permissions (octal 0–777)
     char *endptr = NULL;
     long perms = strtol(msg->arg2, &endptr, 8);
 
@@ -564,7 +574,7 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
     int permissions = (int)perms;
     printf("[CHMOD DEBUG] Permissions parsed: %o\n", permissions);
 
-    // 4) Resolve full path
+    // Resolve full path
     char fullPath[PATH_SIZE];
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         printf("[CHMOD DEBUG] resolvePath failed for: %s\n", msg->arg1);
@@ -575,7 +585,7 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
     printf("[CHMOD DEBUG] Resolved path: %s\n", fullPath);
     printf("[CHMOD DEBUG] Home dir: %s\n", session->homeDir);
 
-    // 5) Path must be inside user's home directory
+    // Path must be inside user's home directory
     if (!isInsideHome(session->homeDir, fullPath)) {
         printf("[CHMOD DEBUG] Not inside home: %s\n", fullPath);
         sendErrorMsg(clientFd);
@@ -584,7 +594,7 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
 
     printf("[CHMOD DEBUG] Inside home: OK\n");
 
-    // 6) Target must exist
+    // Target must exist
     if (!fileExists(fullPath)) {
         printf("[CHMOD DEBUG] File doesn't exist: %s\n", fullPath);
         sendErrorMsg(clientFd);
@@ -593,7 +603,7 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
 
     printf("[CHMOD DEBUG] File exists: OK\n");
 
-    // 7) Protect server root directory
+    // Protect server root directory
     if (strcmp(fullPath, gRootDir) == 0) {
         printf("[CHMOD DEBUG] Cannot modify server root\n");
         sendErrorMsg(clientFd);
@@ -602,7 +612,7 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
 
     printf("[CHMOD DEBUG] Not server root: OK\n");
 
-    // 8) Check if it's a directory
+    // Check if it's a directory
     struct stat st;
     if (stat(fullPath, &st) < 0) {
         printf("[CHMOD DEBUG] stat failed\n");
@@ -613,7 +623,7 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
     int isDirectory = S_ISDIR(st.st_mode);
     
     if (isDirectory) {
-        // Direktorijum: možemo odmah promijeniti prava
+        
         printf("[CHMOD DEBUG] Target is a directory\n");
         int rc = fsChmod(fullPath, permissions);
         printf("[CHMOD DEBUG] fsChmod returned: %d\n", rc);
@@ -632,7 +642,7 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
     // Fajl: treba lock
     printf("[CHMOD DEBUG] Target is a file, locking...\n");
     
-    // 9) Open file to lock it
+    // Open file to lock it
     int fd = open(fullPath, O_RDWR);
     if (fd < 0) {
         printf("[CHMOD DEBUG] Cannot open file for locking\n");
@@ -640,7 +650,7 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 10) Acquire exclusive lock
+    // Acquire exclusive lock
     if (lockFileWrite(fd) < 0) {
         printf("[CHMOD DEBUG] lockFileWrite failed for: %s\n", fullPath);
         close(fd);
@@ -650,24 +660,24 @@ int handleChmod(int clientFd, ProtocolMessage *msg, Session *session)
 
     printf("[CHMOD DEBUG] File locked: OK\n");
 
-    // 11) Perform chmod as logged-in user (no root)
+    // Perform chmod as logged-in user (no root)
     printf("[CHMOD DEBUG] Calling fsChmod(%s, %o)\n", fullPath, permissions);
     int rc = fsChmod(fullPath, permissions);
     printf("[CHMOD DEBUG] fsChmod returned: %d\n", rc);
 
-    // 12) Release lock and close
+    // Release lock and close
     unlockFile(fd);
     close(fd);
     printf("[CHMOD DEBUG] File unlocked\n");
 
-    // 13) Check result
+    // Check result
     if (rc < 0) {
         printf("[CHMOD DEBUG] fsChmod failed\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 14) Success
+    // Success
     printf("[CHMOD DEBUG] Success! Sending OK to client\n");
     sendOk(clientFd, 0);
     return 0;
@@ -680,29 +690,29 @@ int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("MOVE", msg, session);
 
-    // 1) User must be logged in
+    // User must be logged in
     if (!ensureLoggedIn(clientFd, session, "MOVE"))
         return 0;
 
     char src[PATH_SIZE], dst[PATH_SIZE];
 
-    // 2) Both source and destination arguments must exist
+    // Both source and destination arguments must exist
     if (!msg->arg1[0] || !msg->arg2[0]) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 3) Resolve absolute paths
+    // Resolve absolute paths
     if (resolvePath(session, msg->arg1, src) < 0 ||
         resolvePath(session, msg->arg2, dst) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 4) Security checks:
-    //    - both paths must be inside user's home
-    //    - source must exist
-    //    - destination must NOT exist
+    //    Security checks:
+    //    both paths must be inside user's home
+    //    source must exist
+    //    destination must NOT exist
     if (!isInsideHome(session->homeDir, src) ||
         !isInsideHome(session->homeDir, dst) ||
         !fileExists(src) ||
@@ -711,7 +721,7 @@ int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 5) Check if source is a directory
+    // Check if source is a directory
     struct stat st_src;
     if (stat(src, &st_src) < 0) {
         sendErrorMsg(clientFd);
@@ -724,26 +734,23 @@ int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
     int fd_dst_lock = -1;
     
     if (src_is_file) {
-        // Fajl: lock source file
+        // Fail: lock source file
         fd_src = open(src, O_RDONLY);
         if (fd_src >= 0) {
             lockFileWrite(fd_src);
         }
         
-        // Za destinaciju, koristimo .lock fajl za lock (ne sam fajl!)
-        // Ovo sprečava da drugi proces isto pokuša kreirati fajl na istoj lokaciji
         snprintf(lock_dst_path, sizeof(lock_dst_path), "%s.lock", dst);
         fd_dst_lock = open(lock_dst_path, O_CREAT | O_RDWR, 0700);
         if (fd_dst_lock >= 0) {
             lockFileWrite(fd_dst_lock);
         }
     }
-    // Direktorijum: ne možemo lock-ati, ali je rename atomic
 
-    // 6) Perform move / rename
+    // Perform move / rename
     int ok = fsMove(src, dst);
 
-    // 7) Release locks if we locked them
+    // Release locks if we locked them
     if (fd_src >= 0) {
         unlockFile(fd_src);
         close(fd_src);
@@ -755,13 +762,13 @@ int handleMove(int clientFd, ProtocolMessage *msg, Session *session)
         unlink(lock_dst_path);
     }
 
-    // 8) Check result
+    // Check result
     if (ok < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 9) Success
+    // Success
     sendOk(clientFd, 0);
     return 0;
 }
@@ -773,13 +780,13 @@ int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("CD", msg, session);
 
-    // 1) User must be logged in
+    // User must be logged in
     if (!ensureLoggedIn(clientFd, session, "CD"))
         return 0;
 
     char fullPath[PATH_SIZE];
 
-    // 2) No argument: go to home directory
+    // No argument: go to home directory
     if (msg->arg1[0] == '\0') {
         // Update session current directory to home
         strncpy(session->currentDir, session->homeDir, PATH_SIZE);
@@ -793,29 +800,29 @@ int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 3) Resolve target path
+    // Resolve target path
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 4) Target must be inside user's home directory
+    // Target must be inside user's home directory
     if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 5) Target must exist and be a directory
+    // Target must exist and be a directory
     struct stat st;
     if (stat(fullPath, &st) < 0 || !S_ISDIR(st.st_mode)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 6) Update session current directory
+    // Update session current directory
     strncpy(session->currentDir, fullPath, PATH_SIZE);
 
-    // 7) Build display path relative to home directory
+    // Build display path relative to home directory
     char displayPath[PATH_SIZE];
     size_t homeLen = strlen(session->homeDir);
 
@@ -832,7 +839,7 @@ int handleCd(int clientFd, ProtocolMessage *msg, Session *session)
         strcpy(displayPath, "/");
     }
 
-    // 8) Send OK with new display path
+    // Send OK with new display path
     sendOk(clientFd, strlen(displayPath));
     if (strlen(displayPath) > 0) {
         sendAll(clientFd, displayPath, strlen(displayPath));
@@ -849,7 +856,7 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("LIST", msg, session);
 
-    // 1) User must be logged in
+    // User must be logged in
     if (!ensureLoggedIn(clientFd, session, "LIST"))
         return 0;
 
@@ -858,7 +865,7 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     output[0] = '\0';
 
     // ============================================
-    // 1) Determine directory to list
+    // Determine directory to list
     // ============================================
     if (msg->arg1[0] == '\0') {
         // No argument -> current directory
@@ -870,7 +877,7 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
         snprintf(fullPath, PATH_SIZE, "%s/%s", gRootDir, msg->arg1 + 1);
     }
     else {
-        // Relative path -> resolve against current directory
+        // Relative path resolve against current directory
         if (resolvePath(session, msg->arg1, fullPath) < 0) {
             printf("[LIST] ERROR: resolvePath failed for '%s'\n", msg->arg1);
             sendErrorMsg(clientFd);
@@ -879,7 +886,7 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ============================================
-    // 2) Security check: must stay inside server root
+    // Security check: must stay inside server root
     // ============================================
     if (!isInsideRoot(gRootDir, fullPath)) {
         printf("[LIST] ERROR: Path outside root: '%s'\n", fullPath);
@@ -888,7 +895,7 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ============================================
-    // 3) Check if directory exists
+    // Check if directory exists
     // ============================================
     struct stat st;
     if (stat(fullPath, &st) < 0) {
@@ -907,7 +914,7 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     mode_t mode = st.st_mode;
 
     // ============================================
-    // 4) PERMISSION CHECK
+    // PERMISSION CHECK
     // ============================================
     // If directory is inside user's own home,
     // check OWNER permissions (r + x)
@@ -930,7 +937,7 @@ int handleList(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ============================================
-    // 5) Open directory
+    // Open directory
     // ============================================
     DIR *dir = opendir(fullPath);
     if (!dir) {
@@ -1029,11 +1036,11 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("READ", msg, session);
 
-    // 1) User must be logged in
+    // User must be logged in
     if (!ensureLoggedIn(clientFd, session, "READ"))
         return 0;
 
-    // 2) Path argument must exist
+    // Path argument must exist
     if (msg->arg1[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
@@ -1041,29 +1048,29 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
 
     char fullPath[PATH_SIZE];
 
-    // 3) Resolve absolute path
+    // Resolve absolute path
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 4) Security checks:
-    //    - file must be inside user's home directory
-    //    - file must exist
+    // Security checks:
+    // file must be inside user's home directory
+    // file must exist
     if (!isInsideHome(session->homeDir, fullPath) ||
         !fileExists(fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 5) Parse optional offset
+    // Parse optional offset
     int offset = 0;
     if (msg->arg2[0] != '\0') {
         offset = atoi(msg->arg2);
         if (offset < 0) offset = 0;
     }
 
-    // 6) Open file for reading
+    // Open file for reading
     int fd = open(fullPath, O_RDONLY);
     if (fd < 0) {
         printf("[READ] Cannot open file '%s'\n", fullPath);
@@ -1071,7 +1078,7 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 7) Acquire shared lock for reading
+    // Acquire shared lock for reading
     if (lockFileRead(fd) < 0) {
         printf("[READ] Cannot lock file '%s' for reading\n", fullPath);
         close(fd);
@@ -1079,7 +1086,7 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 8) Check file type and size
+    // Check file type and size
     struct stat st;
     if (stat(fullPath, &st) < 0 || !S_ISREG(st.st_mode)) {
         unlockFile(fd);
@@ -1099,7 +1106,7 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
     char *buffer = NULL;
     int   readBytes = 0;
 
-    // 9) Read file content (if any)
+    // Read file content (if any)
     if (toRead > 0) {
         buffer = malloc(toRead);
         if (!buffer) {
@@ -1119,14 +1126,14 @@ int handleRead(int clientFd, ProtocolMessage *msg, Session *session)
         }
     }
 
-    // 10) Release file lock and close
+    // Release file lock and close
     unlockFile(fd);
     close(fd);
 
-    // 11) Send OK with number of bytes read
+    // Send OK with number of bytes read
     sendOk(clientFd, readBytes);
 
-    // 12) Send file data
+    // Send file data
     if (readBytes > 0) {
         sendAll(clientFd, buffer, readBytes);
         free(buffer);
@@ -1144,11 +1151,11 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("WRITE", msg, session);
 
-    // 1) User must be logged in
+    // User must be logged in
     if (!ensureLoggedIn(clientFd, session, "WRITE"))
         return 0;
 
-    // 2) Path argument must exist
+    // Path argument must exist
     if (msg->arg1[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
@@ -1156,26 +1163,26 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 
     char fullPath[PATH_SIZE];
 
-    // 3) Resolve absolute path
+    // Resolve absolute path
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 4) Target must be inside user's home directory
+    // Target must be inside user's home directory
     if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 5) Parse optional offset
+    // Parse optional offset
     int offset = 0;
     if (msg->arg2[0] != '\0') {
         offset = atoi(msg->arg2);
         if (offset < 0) offset = 0;
     }
 
-    // 6) Open file for writing (create if needed)
+    // Open file for writing (create if needed)
     int fd = open(fullPath, O_WRONLY | O_CREAT, 0700);
     if (fd < 0) {
         printf("[WRITE] Cannot open/create file '%s'\n", fullPath);
@@ -1183,7 +1190,7 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 7) Acquire exclusive lock for writing
+    // Acquire exclusive lock for writing
     if (lockFileWrite(fd) < 0) {
         printf("[WRITE] Cannot lock file '%s' for writing\n", fullPath);
         close(fd);
@@ -1191,10 +1198,10 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 8) Send ACK to client (ready to receive data)
+    // Send ACK to client (ready to receive data)
     sendOk(clientFd, 0);
 
-    // 9) Receive data size
+    // Receive data size
     int size = 0;
     if (recvAll(clientFd, &size, sizeof(int)) < 0 || size < 0) {
         unlockFile(fd);
@@ -1205,7 +1212,7 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 
     char *buffer = NULL;
 
-    // 10) Receive data buffer (if size > 0)
+    // Receive data buffer (if size > 0)
     if (size > 0) {
         buffer = malloc(size);
         if (!buffer) {
@@ -1224,23 +1231,23 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
         }
     }
 
-    // 11) Write to file
+    // Write to file
     int written = fsWriteFile(fullPath, buffer, size, offset);
 
     if (buffer)
         free(buffer);
 
-    // 12) Release lock and close
+    // Release lock and close
     unlockFile(fd);
     close(fd);
 
-    // 13) Check result
+    // Check result
     if (written < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 14) Send final OK with number of bytes written
+    // Send final OK with number of bytes written
     sendOk(clientFd, written);
     printf("[WRITE] %d bytes -> '%s' (offset=%d)\n",
            written, fullPath, offset);
@@ -1250,18 +1257,15 @@ int handleWrite(int clientFd, ProtocolMessage *msg, Session *session)
 // ================================================================
 // DELETE
 // ================================================================
-// ================================================================
-// DELETE (delete file or directory inside user's home)
-// ================================================================
 int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("DELETE", msg, session);
 
-    // 1) User must be logged in
+    // User must be logged in
     if (!ensureLoggedIn(clientFd, session, "DELETE"))
         return 0;
 
-    // 2) Path argument must exist
+    // Path argument must exist
     if (msg->arg1[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
@@ -1269,20 +1273,20 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
 
     char fullPath[PATH_SIZE];
 
-    // 3) Resolve absolute path
+    // Resolve absolute path
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 4) Target must be inside user's home directory and must exist
+    // Target must be inside user's home directory and must exist
     if (!isInsideHome(session->homeDir, fullPath) ||
         !fileExists(fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 5) Check if it's a regular file or directory
+    // Check if it's a regular file or directory
     struct stat st;
     if (stat(fullPath, &st) < 0) {
         sendErrorMsg(clientFd);
@@ -1292,7 +1296,7 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
     int isFile = S_ISREG(st.st_mode);
     int fd = -1;
 
-    // 6) If it's a file, lock it before deletion
+    // If it's a file, lock it before deletion
     if (isFile) {
         fd = open(fullPath, O_RDWR);
         if (fd >= 0) {
@@ -1303,24 +1307,23 @@ int handleDelete(int clientFd, ProtocolMessage *msg, Session *session)
             }
         }
     }
-    // Direktorijum: ne možemo lock-ati ali možemo obrisati
 
     // 7) Delete file or directory recursively
     int ok = removeRecursive(fullPath);
 
-    // 8) Release lock if we locked it
+    // Release lock if we locked it
     if (fd >= 0) {
         unlockFile(fd);
         close(fd);
     }
 
-    // 9) Check result
+    // Check result
     if (ok < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 10) Success
+    // Success
     sendOk(clientFd, 0);
     return 0;
 }
@@ -1331,32 +1334,32 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("UPLOAD", msg, session);
 
-    // 1) User must be logged in
+    // User must be logged in
     if (!ensureLoggedIn(clientFd, session, "UPLOAD"))
         return 0;
 
     char fullPath[PATH_SIZE];
     int size = atoi(msg->arg2);
 
-    // 2) Validate arguments
+    // Validate arguments
     if (!msg->arg1[0] || size < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 3) Resolve absolute path
+    // Resolve absolute path
     if (resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 4) Target must be inside user's home directory
+    // Target must be inside user's home directory
     if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 5) Open file for writing (create if needed)
+    // Open file for writing (create if needed)
     int fd = open(fullPath, O_WRONLY | O_CREAT, 0700);
     if (fd < 0) {
         printf("[UPLOAD] Cannot open/create file '%s'\n", fullPath);
@@ -1364,7 +1367,7 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 6) Acquire exclusive lock for writing
+    // Acquire exclusive lock for writing
     if (lockFileWrite(fd) < 0) {
         printf("[UPLOAD] Cannot lock file '%s' for writing\n", fullPath);
         close(fd);
@@ -1372,10 +1375,10 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 7) Acknowledge client and request file data
+    // Acknowledge client and request file data
     sendOk(clientFd, 0);
 
-    // 8) Receive file content
+    // Receive file content
     char *buffer = malloc(size);
     if (!buffer) {
         unlockFile(fd);
@@ -1392,22 +1395,22 @@ int handleUpload(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 9) Write received data to file (overwrite)
+    // Write received data to file (overwrite)
     int written = fsWriteFile(fullPath, buffer, size, 0);
 
     free(buffer);
     
-    // 10) Release lock and close
+    // Release lock and close
     unlockFile(fd);
     close(fd);
 
-    // 11) Check result
+    // Check result
     if (written < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 12) Send final OK with number of bytes written
+    // Send final OK with number of bytes written
     sendOk(clientFd, written);
     return 0;
 }
@@ -1419,26 +1422,26 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("DOWNLOAD", msg, session);
 
-    // 1) User must be logged in
+    // User must be logged in
     if (!ensureLoggedIn(clientFd, session, "DOWNLOAD"))
         return 0;
 
     char fullPath[PATH_SIZE];
 
-    // 2) Validate and resolve path
+    // Validate and resolve path
     if (!msg->arg1[0] ||
         resolvePath(session, msg->arg1, fullPath) < 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 3) Target must be inside user's home directory
+    // Target must be inside user's home directory
     if (!isInsideHome(session->homeDir, fullPath)) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 4) Target must be a regular file
+    // Target must be a regular file
     struct stat st;
     if (stat(fullPath, &st) < 0 || !S_ISREG(st.st_mode)) {
         sendErrorMsg(clientFd);
@@ -1447,7 +1450,7 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 
     int size = (int)st.st_size;
 
-    // 5) Open file for reading
+    // Open file for reading
     int fd = open(fullPath, O_RDONLY);
     if (fd < 0) {
         printf("[DOWNLOAD] Cannot open file '%s'\n", fullPath);
@@ -1455,7 +1458,7 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 6) Acquire shared lock for reading
+    // Acquire shared lock for reading
     if (lockFileRead(fd) < 0) {
         printf("[DOWNLOAD] Cannot lock file '%s' for reading\n", fullPath);
         close(fd);
@@ -1463,7 +1466,7 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
         return 0;
     }
 
-    // 7) Allocate buffer and read file
+    // Allocate buffer and read file
     char *buffer = malloc(size);
     if (!buffer) {
         unlockFile(fd);
@@ -1474,18 +1477,18 @@ int handleDownload(int clientFd, ProtocolMessage *msg, Session *session)
 
     int readBytes = fsReadFile(fullPath, buffer, size, 0);
 
-    // 8) Release lock and close
+    // Release lock and close
     unlockFile(fd);
     close(fd);
 
-    // 9) Check read result
+    // Check read result
     if (readBytes < 0) {
         free(buffer);
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 10) Send file size and content to client
+    // Send file size and content to client
     sendOk(clientFd, readBytes);
     sendAll(clientFd, buffer, readBytes);
 
@@ -1500,20 +1503,20 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 {
     debugCommand("DELETE_USER", msg, session);
 
-    // 1) User must NOT be logged in
+    // User must NOT be logged in
     if (session->isLoggedIn) {
         printf("[DELETE_USER] ERROR: must NOT be logged in\n");
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 2) Username is required
+    // Username is required
     if (msg->arg1[0] == '\0') {
         sendErrorMsg(clientFd);
         return 0;
     }
 
-    // 2.1) No extra arguments allowed
+    // No extra arguments allowed
     if (msg->arg2[0] != '\0' || msg->arg3[0] != '\0') {
         sendErrorMsg(clientFd);
         return 0;
@@ -1521,14 +1524,14 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
 
     const char *target = msg->arg1;
 
-    // 3) Protection: root user cannot be deleted
+    // Protection: root user cannot be deleted
     if (strcmp(target, "root") == 0) {
         sendErrorMsg(clientFd);
         return 0;
     }
 
     // ============================================================
-    // 4) Check if system user exists
+    // Check if system user exists
     // ============================================================
     struct passwd *pwd = getpwnam(target);
     if (!pwd) {
@@ -1539,7 +1542,7 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
     char homePath[PATH_SIZE];
     snprintf(homePath, PATH_SIZE, "%s/%s", gRootDir, target);
 
-    // 5) Temporarily elevate privileges to root
+    // Temporarily elevate privileges to root
     uid_t old_euid;
     if (elevateToRoot(&old_euid) < 0) {
         sendErrorMsg(clientFd);
@@ -1549,7 +1552,7 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
     int error = 0;
 
     // ============================================================
-    // A) Delete system user (userdel -r <user>)
+    // Delete system user
     // ============================================================
     {
         pid_t pid = fork();
@@ -1569,7 +1572,7 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ============================================================
-    // B) Remove /var/mail/<user> if it exists
+    // Remove /var/mail/<user> if it exists
     // ============================================================
     {
         char mailPath[PATH_SIZE];
@@ -1578,7 +1581,7 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
     }
 
     // ============================================================
-    // C) Remove virtual home directory inside server root
+    // Remove virtual home directory inside server root
     // ============================================================
     if (fileExists(homePath)) {
         if (removeRecursive(homePath) < 0) {
@@ -1586,10 +1589,10 @@ int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session)
         }
     }
 
-    // 6) Drop root privileges
+    // Drop root privileges
     dropFromRoot(old_euid);
 
-    // 7) Final result
+    // Final result
     if (error) {
         sendErrorMsg(clientFd);
         return 0;

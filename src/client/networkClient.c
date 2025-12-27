@@ -106,16 +106,18 @@ int recvAll(int sock, void *buffer, int size)
 }
 
 // ------------------------------------------------------------
-// UPLOAD FILE (client → server)
+// UPLOAD FILE (client - server)
 // ------------------------------------------------------------
 int uploadFile(int sock, const char *localPath, const char *remotePath)
 {
+    // Open local file in binary read mode
     FILE *f = fopen(localPath, "rb");
     if (!f) {
         perror("fopen");
-        return -1;   // lokalni problem (fajl ne postoji itd.)
+        return -1;
     }
 
+    // Determine file size
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -126,9 +128,17 @@ int uploadFile(int sock, const char *localPath, const char *remotePath)
         return -1;
     }
 
+    // Safety check: prevent huge file uploads
+    if (fsize > MAX_FILE_SIZE) {
+        printf("[UPLOAD] File too large (%ld bytes, max %d)\n",
+               fsize, MAX_FILE_SIZE);
+        fclose(f);
+        return -1;
+    }
+
     int size = (int)fsize;
 
-    // Pripremi upload komandu
+    // Prepare upload request header
     ProtocolMessage msg;
     memset(&msg, 0, sizeof(msg));
 
@@ -136,20 +146,20 @@ int uploadFile(int sock, const char *localPath, const char *remotePath)
     strncpy(msg.arg1, remotePath, sizeof(msg.arg1));
     snprintf(msg.arg2, sizeof(msg.arg2), "%d", size);
 
-    // Pošalji poruku serveru (koristi sendAll → fatal na grešci)
+    // Send upload header to server
     sendAll(sock, &msg, sizeof(msg));
 
-    // Primi odgovor od servera
+    // Receive server response (accept / deny upload)
     ProtocolResponse res;
     recvAll(sock, &res, sizeof(res));
 
     if (res.status != STATUS_OK) {
-        printf("[UPLOAD] server refused upload\n");
+        printf("[UPLOAD] Server refused upload\n");
         fclose(f);
         return -1;
     }
 
-    // Učitaj fajl u buffer
+    // Load file content into memory
     char *buffer = NULL;
     if (size > 0) {
         buffer = malloc(size);
@@ -169,16 +179,16 @@ int uploadFile(int sock, const char *localPath, const char *remotePath)
     }
     fclose(f);
 
-    // Pošalji fajl serveru (ako ima sadržaja)
+    // Send file content to server
     if (size > 0) {
         sendAll(sock, buffer, size);
         free(buffer);
     }
 
-    // Primi završni OK od servera
+    // Receive final server confirmation
     recvAll(sock, &res, sizeof(res));
     if (res.status != STATUS_OK) {
-        printf("[UPLOAD] final response not OK\n");
+        printf("[UPLOAD] Final server response not OK\n");
         return -1;
     }
 
@@ -186,36 +196,38 @@ int uploadFile(int sock, const char *localPath, const char *remotePath)
 }
 
 // ------------------------------------------------------------
-// DOWNLOAD FILE (server → client)
+// DOWNLOAD FILE (server - client)
 // ------------------------------------------------------------
 int downloadFile(int sock, const char *remotePath, const char *localPath)
 {
-    // Pošalji download komandu
+    // Prepare download request
     ProtocolMessage msg;
     memset(&msg, 0, sizeof(msg));
 
     msg.command = CMD_DOWNLOAD;
     strncpy(msg.arg1, remotePath, sizeof(msg.arg1));
 
-    // header ka serveru
+    // Send download request to server
     sendAll(sock, &msg, sizeof(msg));
 
-    // Primi odgovor servera
+    // Receive server response
     ProtocolResponse res;
     recvAll(sock, &res, sizeof(res));
 
     if (res.status != STATUS_OK) {
-        printf("[DOWNLOAD] server refused\n");
+        printf("[DOWNLOAD] Server refused download\n");
         return -1;
     }
 
     int size = res.dataSize;
-    if (size < 0) {
-        printf("[DOWNLOAD] invalid size\n");
+
+    // Safety check: validate received file size
+    if (size < 0 || size > MAX_FILE_SIZE) {
+        printf("[DOWNLOAD] Invalid or too large file (%d bytes)\n", size);
         return -1;
     }
 
-    // Ako nema ništa za preuzeti
+    // Handle empty file case
     if (size == 0) {
         FILE *fempty = fopen(localPath, "wb");
         if (!fempty) {
@@ -226,15 +238,17 @@ int downloadFile(int sock, const char *remotePath, const char *localPath)
         return 0;
     }
 
+    // Allocate buffer for incoming file data
     char *buffer = malloc(size);
     if (!buffer) {
         printf("[DOWNLOAD] Out of memory\n");
         return -1;
     }
 
-    // Primi sadržaj fajla
+    // Receive file content
     recvAll(sock, buffer, size);
 
+    // Write file to disk
     FILE *f = fopen(localPath, "wb");
     if (!f) {
         perror("fopen");
@@ -245,7 +259,6 @@ int downloadFile(int sock, const char *remotePath, const char *localPath)
     int written = (int)fwrite(buffer, 1, size, f);
     if (written != size) {
         printf("[DOWNLOAD] fwrite mismatch (%d/%d)\n", written, size);
-        // ali fajl je ipak skoro kompletan; tvoj call da li ćeš brisati
     }
 
     fclose(f);
@@ -253,3 +266,4 @@ int downloadFile(int sock, const char *remotePath, const char *localPath)
 
     return 0;
 }
+
