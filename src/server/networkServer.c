@@ -22,18 +22,13 @@ int createServerSocket(const char *ip, int port)
         return -1;
     }
 
-    // Allow fast port reuse (useful during development)
+    // Allow fast port reuse 
     int opt = 1;
     if (setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         perror("setsockopt");
         close(serverFd);
         return -1;
     }
-
-#ifdef SO_REUSEPORT
-    // Optional: allow multiple binds on same port (platform-dependent)
-    setsockopt(serverFd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-#endif
 
     // Prepare bind address
     memset(&addr, 0, sizeof(addr));
