@@ -12,12 +12,11 @@
 #include "../../include/fsOps.h"
 #include "../../include/utils.h"
 
-// Global root directory (defined in serverMain.c)
+// Global root directory
 extern const char *gRootDir;
 
 // ============================================================
-// LOCKING IMPLEMENTATION — fcntl()
-// Uses kernel-level advisory locks
+// LOCKING — fcntl()
 // ============================================================
 
 // Acquire shared (read) lock on entire file
@@ -25,7 +24,7 @@ int lockFileRead(int fd)
 {
     struct flock fl;
     memset(&fl, 0, sizeof(fl));
-    fl.l_type   = F_RDLCK;   // Shared lock
+    fl.l_type   = F_RDLCK;      // Shared lock
     fl.l_whence = SEEK_SET;
     fl.l_start  = 0;
     fl.l_len    = 0;        // Lock whole file
@@ -39,10 +38,10 @@ int lockFileWrite(int fd)
 {
     struct flock fl;
     memset(&fl, 0, sizeof(fl));
-    fl.l_type   = F_WRLCK;   // Exclusive lock
+    fl.l_type   = F_WRLCK;          // Exclusive lock
     fl.l_whence = SEEK_SET;
     fl.l_start  = 0;
-    fl.l_len    = 0;        // Lock whole file
+    fl.l_len    = 0;
 
     // Blocking call until lock is acquired
     return fcntl(fd, F_SETLKW, &fl);
@@ -63,13 +62,8 @@ int unlockFile(int fd)
 
 // ============================================================
 // PATH HANDLING HELPERS
-// Normalize paths to prevent traversal attacks
 // ============================================================
 
-// Normalize path:
-// removes ".", ".."
-// removes duplicate slashes
-// keeps absolute/relative form
 static char* normalize_path(const char *path, char *normalized, size_t size)
 {
     if (!path || !normalized || size == 0)
@@ -120,9 +114,7 @@ static char* normalize_path(const char *path, char *normalized, size_t size)
 }
 
 // ============================================================
-// resolvePath
 // Resolves user input path into an absolute server-side path
-// Ensures sandboxing inside gRootDir
 // ============================================================
 int resolvePath(Session *s, const char *inputPath, char *outputPath)
 {
@@ -138,6 +130,7 @@ int resolvePath(Session *s, const char *inputPath, char *outputPath)
     // --------------------------------------------------------
     // 1) Determine base directory
     // --------------------------------------------------------
+    // Jusst want to be sure where are we starting from!
     char base[PATH_SIZE];
 
     if (inputPath[0] == '/') {
@@ -146,7 +139,7 @@ int resolvePath(Session *s, const char *inputPath, char *outputPath)
             // "/" maps to user's home directory
             snprintf(base, PATH_SIZE, "%s", s->homeDir);
         } else {
-            // Fallback (should normally not happen)
+            // Just checking! This shouldn't happend because we are checking if user is loged in!
             snprintf(base, PATH_SIZE, "%s", gRootDir);
         }
     } else {
@@ -163,17 +156,17 @@ int resolvePath(Session *s, const char *inputPath, char *outputPath)
         result[PATH_SIZE - 1] = '\0';
     }
     else if (inputPath[0] == '/') {
-        // Absolute path inside virtual filesystem
-        // Mapped under server root directory
+        // Absolute path 
         snprintf(result, PATH_SIZE, "%s%s", gRootDir, inputPath);
     }
     else {
-        // Relative path append to base safely
+        // Relative path append to base
         size_t base_len  = strlen(base);
         size_t input_len = strlen(inputPath);
 
+        // Just ti check if path is too long once we have built it
         if (base_len + 1 + input_len + 1 > PATH_SIZE) {
-            return -1; // Path too long
+            return -1; 
         }
 
         strcpy(result, base);
@@ -184,15 +177,15 @@ int resolvePath(Session *s, const char *inputPath, char *outputPath)
     }
 
     // --------------------------------------------------------
-    // 3) Normalize path (handle ".", "..", duplicate "/")
+    // 3) Normalize path
     // --------------------------------------------------------
     normalize_path(result, normalized, PATH_SIZE);
 
     // --------------------------------------------------------
-    // 4) Sandbox check: must stay inside server root
+    // 4) Sandbox check
     // --------------------------------------------------------
     if (strncmp(normalized, gRootDir, strlen(gRootDir)) != 0) {
-        return -1; // Path escapes root directory
+        return -1;  // We don't need it right now because we check every path with is inside root but it dosen't change anything
     }
 
     // --------------------------------------------------------
@@ -205,7 +198,6 @@ int resolvePath(Session *s, const char *inputPath, char *outputPath)
 }
 
 // ============================================================
-// isInsideRoot
 // Checks if fullPath is inside rootDir
 // ============================================================
 int isInsideRoot(const char *rootDir, const char *fullPath)
@@ -226,17 +218,16 @@ int isInsideRoot(const char *rootDir, const char *fullPath)
     }
 
     // Subdirectory of rootDir
+    // This is how we get rid of prefixes if someone tries to attack
     if (fullPath[rootLen] == '/') {
         return 1;
     }
-
-    // Prevent prefix trick (e.g. /rootDir_fake)
+    
     return 0;
 }
 
 // ============================================================
 // Check if path is inside user's home directory
-// Used for permission / sandbox validation
 // ============================================================
 int isInsideHome(const char *homeDir, const char *fullPath)
 {
@@ -250,17 +241,17 @@ int isInsideHome(const char *homeDir, const char *fullPath)
         return 0;
     }
 
-    // Exact match: home directory itself
+    // Home directory itself
     if (fullPath[homeLen] == '\0') {
         return 1;
     }
 
     // Subdirectory inside home
+    // Also same as in root dir check this way we are sure there are no prefix attacks
     if (fullPath[homeLen] == '/') {
         return 1;
     }
 
-    // Prevent prefix trick (e.g. /home/userX)
     return 0;
 }
 
@@ -286,7 +277,6 @@ int fsCreate(const char *path, int permissions, int isDirectory)
 
 // ============================================================
 // CHMOD
-// Change file permissions
 // ============================================================
 int fsChmod(const char *path, int permissions)
 {
@@ -295,7 +285,6 @@ int fsChmod(const char *path, int permissions)
 
 // ============================================================
 // MOVE / RENAME
-// Atomic rename inside filesystem
 // ============================================================
 int fsMove(const char *src, const char *dst)
 {
@@ -303,7 +292,7 @@ int fsMove(const char *src, const char *dst)
 }
 
 // ============================================================
-// READ file with shared (read) lock
+// READ file
 // ============================================================
 int fsReadFile(const char *path, char *buffer, int size, int offset)
 {
@@ -312,7 +301,7 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
     if (fd < 0)
         return -1;
 
-    // Move to requested offset
+    // Moveing to requested offset
     if (lseek(fd, offset, SEEK_SET) < 0) {
         close(fd);
         return -1;
@@ -328,7 +317,7 @@ int fsReadFile(const char *path, char *buffer, int size, int offset)
 }
 
 // ============================================================
-// WRITE file with exclusive (write) lock
+// WRITE file
 // ============================================================
 int fsWriteFile(const char *path, const char *data, int size, int offset)
 {
@@ -336,7 +325,8 @@ int fsWriteFile(const char *path, const char *data, int size, int offset)
     fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0700);
 
     if (fd >= 0) {
-        // New file: fix permissions
+        // I am changeing permissions again because for some reason if I don't I get 660 permission!
+        // It is said that it's done because of umask of the system!
         if (fchmod(fd, 0700) < 0) {
             close(fd);
             return -1;
@@ -350,10 +340,8 @@ int fsWriteFile(const char *path, const char *data, int size, int offset)
         if (fd < 0)
             return -1;
     }
-
     
-    // offset == 0 means overwrite 
-    
+    // This is just used for overwriting a file (that's if we don't specify a offset)  
     if (offset == 0) {
         if (ftruncate(fd, 0) < 0) {
             close(fd);

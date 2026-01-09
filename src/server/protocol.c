@@ -2,15 +2,14 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../../include/network.h"   // sendAll / recvAll
-#include "../../include/protocol.h"  // ProtocolMessage / ProtocolResponse
+#include "../../include/network.h"   
+#include "../../include/protocol.h"  
 
 // ------------------------------------------------------------
 // Send a complete ProtocolMessage structure
 // ------------------------------------------------------------
 int sendMessage(int sock, ProtocolMessage *msg)
 {
-    // Basic null check
     if (!msg) {
         fprintf(stderr, "sendMessage: NULL pointer\n");
         return -1;
@@ -30,7 +29,6 @@ int sendMessage(int sock, ProtocolMessage *msg)
 // ------------------------------------------------------------
 int receiveMessage(int sock, ProtocolMessage *msg)
 {
-    // Basic null check
     if (!msg) {
         fprintf(stderr, "receiveMessage: NULL pointer\n");
         return -1;
@@ -50,7 +48,6 @@ int receiveMessage(int sock, ProtocolMessage *msg)
 // ------------------------------------------------------------
 int sendResponse(int sock, ProtocolResponse *res)
 {
-    // Basic null check
     if (!res) {
         fprintf(stderr, "sendResponse: NULL pointer\n");
         return -1;
@@ -70,7 +67,6 @@ int sendResponse(int sock, ProtocolResponse *res)
 // ------------------------------------------------------------
 int receiveResponse(int sock, ProtocolResponse *res)
 {
-    // Basic null check
     if (!res) {
         fprintf(stderr, "receiveResponse: NULL pointer\n");
         return -1;

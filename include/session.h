@@ -18,10 +18,4 @@ void initSession(Session *s);
 // Set session data after successful login
 int loginUser(Session *s, const char *rootDir, const char *username);
 
-// Change current directory (path already validated)
-int changeDirectory(Session *s, const char *newAbsPath);
-
-// Build absolute path from user input
-int buildFullPath(Session *s, const char *userPath, char *outputPath);
-
 #endif

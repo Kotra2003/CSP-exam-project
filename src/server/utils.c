@@ -66,15 +66,15 @@ int fileExists(const char *path)
 
 // =======================================================
 //   removeRecursive
-//   Recursively removes a file or directory (similar to rm -rf)
+//   Recursively removes a file or directory 
 //   Used for deleting user home directories inside rootDir
 // =======================================================
 int removeRecursive(const char *path)
 {
-    // Remove associated .lock file if it exists
+    // Remove associated .lock file if it exists (just wanted to say that lock files are no longer used but I left it just in case)
     char lockFile[PATH_SIZE + 10];
     snprintf(lockFile, sizeof(lockFile), "%s.lock", path);
-    unlink(lockFile); // ignore errors
+    unlink(lockFile);
 
     struct stat st;
     if (lstat(path, &st) < 0) {
