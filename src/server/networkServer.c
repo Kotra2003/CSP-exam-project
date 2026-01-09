@@ -33,7 +33,7 @@ int createServerSocket(const char *ip, int port)
     // Prepare bind address
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons(port);
+    addr.sin_port  = htons(port);
 
     // Convert IP string to binary form
     if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
@@ -79,7 +79,7 @@ int acceptClient(int serverFd)
 
 // ------------------------------------------------------------
 // sendAll
-// Sends EXACTLY "size" bytes over TCP
+// Sends size bytes over TCP
 // ------------------------------------------------------------
 int sendAll(int sock, const void *buffer, int size)
 {
@@ -106,7 +106,7 @@ int sendAll(int sock, const void *buffer, int size)
 
 // ------------------------------------------------------------
 // recvAll
-// Receives EXACTLY "size" bytes over TCP
+// Receives size bytes over TCP
 // ------------------------------------------------------------
 int recvAll(int sock, void *buffer, int size)
 {

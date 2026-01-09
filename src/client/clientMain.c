@@ -1,21 +1,20 @@
-#include <stdio.h>      // Standard I/O
-#include <string.h>     // String handling
-#include <stdlib.h>     // Memory management
-#include <unistd.h>     // POSIX API
-#include <poll.h>       // poll()
-#include <sys/socket.h> // Sockets
-#include <signal.h>     // Signals
-#include <sys/wait.h>   // waitpid()
-#include <errno.h>      // errno
-#include <arpa/inet.h>  // inet_pton()
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <arpa/inet.h>
 
-#include "../../include/network.h"        // Networking helpers
-#include "../../include/utils.h"          // Utility helpers
-#include "../../include/clientCommands.h" // Client command logic
+#include "../../include/network.h"
+#include "../../include/utils.h"
+#include "../../include/clientCommands.h"
 
-#define INPUT_SIZE 512   // Maximum input length
+#define INPUT_SIZE 512
 
-// ANSI colors for UI
 #define RESET   "\033[0m"
 #define RED     "\033[31m"
 #define GREEN   "\033[32m"
@@ -23,40 +22,35 @@
 #define BLUE    "\033[34m"
 #define CYAN    "\033[36m"
 
-// External client state accessors
 extern const char* getCurrentPath();
 extern const char* getUsername();
 extern void unregisterBackgroundProcess(pid_t pid);
 
 // ============================================
-// SIGCHLD handler
-// Cleans up finished background processes
+// SIGCHLD: pokupi završene background procese
 // ============================================
 static void handleChildSignal(int sig)
 {
-    (void)sig; // Unused parameter
+    (void)sig;
     pid_t pid;
     int status;
 
-    // Reap all terminated child processes
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
         unregisterBackgroundProcess(pid);
     }
 }
 
 // ============================================
-// Print interactive prompt with colors
+// Prompt (guest ili ulogovani korisnik)
 // ============================================
 static void printPrompt(void)
 {
     const char *username = getUsername();
     const char *path = getCurrentPath();
 
-    // Guest prompt
     if (username[0] == '\0') {
         printf(RED "guest" RESET "@" BLUE "127.0.0.1" RESET ":" GREEN "%s" RESET "$ ", path);
     } else {
-        // Logged-in user prompt
         printf(GREEN "%s" RESET "@" BLUE "127.0.0.1" RESET ":" CYAN "%s" RESET "$ ", username, path);
     }
 
@@ -64,7 +58,7 @@ static void printPrompt(void)
 }
 
 // ============================================
-// Print client startup information
+// Kratki header na startu klijenta
 // ============================================
 static void printClientInfo(const char *ip, int port)
 {
@@ -76,7 +70,7 @@ static void printClientInfo(const char *ip, int port)
 }
 
 // ============================================
-// Print help message
+// Help / spisak komandi
 // ============================================
 void printHelp()
 {
@@ -103,30 +97,22 @@ void printHelp()
 // ============================================
 int main(int argc, char *argv[])
 {
-    // ================================
-    // Install SIGCHLD handler
-    // Used to clean up finished background processes
-    // ================================
+    // SIGCHLD: da ne ostaju zombie procesi od -b transfera
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handleChildSignal;
     sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
     sigaction(SIGCHLD, &sa, NULL);
 
-    // ================================
-    // Default values and safe argument parsing
-    // Usage:
-    //   ./client
-    //   ./client <ip> <port>
-    // ================================
+    // ./client  (default)  ili  ./client <ip> <port>
     const char *ip = "127.0.0.1";
     int port = 8080;
 
     if (argc == 1) {
-        // Use default IP and port
+        // default ip/port
     }
     else if (argc == 3) {
-        // Validate IP address
+        // Validacija IP
         struct in_addr tmp;
         if (inet_pton(AF_INET, argv[1], &tmp) != 1) {
             printf(RED "[X] Invalid IP address: %s\n" RESET, argv[1]);
@@ -134,7 +120,7 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        // Validate port number
+        // Validacija porta
         char *endptr = NULL;
         long p = strtol(argv[2], &endptr, 10);
         if (!endptr || *endptr != '\0' || p <= 0 || p > 65535) {
@@ -147,62 +133,53 @@ int main(int argc, char *argv[])
         port = (int)p;
     }
     else {
-        // Invalid argument count
         printf(RED "[X] Invalid arguments\n" RESET);
         printf(YELLOW "[!] Usage: ./client [<ip> <port>]\n" RESET);
         return 1;
     }
 
-    // Store server info for background operations
+        // Save server info for background jobs
     setGlobalServerInfo(ip, port);
 
-    // ================================
     // Connect to server
-    // ================================
     int sock = connectToServer(ip, port);
     if (sock < 0) {
         printf(RED "Could not connect to server.\n" RESET);
         return 1;
     }
 
-    // Print startup info
+    // Startup messages
     printClientInfo(ip, port);
     printf("Connected to " GREEN "%s:%d" RESET "\n", ip, port);
     printf("Type " YELLOW "'help'" RESET " for commands\n\n");
 
     char input[INPUT_SIZE];
 
-    // ================================
-    // poll() setup: stdin + server socket
-    // ================================
+    // poll: stdin + server socket
     struct pollfd fds[2];
-    fds[0].fd = STDIN_FILENO; // User input
+    fds[0].fd = STDIN_FILENO;
     fds[0].events = POLLIN;
-    fds[1].fd = sock;        // Server socket
+    fds[1].fd = sock;
     fds[1].events = POLLIN;
 
-    // ================================
-    // Main event loop
-    // ================================
+    // Main loop
     while (1) {
         printPrompt();
 
-        // Wait for input from user or server
         int ret = poll(fds, 2, -1);
-
         if (ret < 0) {
-            if (errno == EINTR) continue; // Interrupted by signal
+            if (errno == EINTR) continue;
             perror("poll");
             break;
         }
 
-        // Server closed connection or error occurred
+        // Server disconnected
         if (fds[1].revents & (POLLHUP | POLLERR)) {
             printf(RED "\nServer disconnected\n" RESET);
             break;
         }
 
-        // Server activity check (detect disconnect)
+        // Check server socket
         if (fds[1].revents & POLLIN) {
             char buf[1];
             int r = recv(sock, buf, 1, MSG_PEEK);
@@ -212,29 +189,25 @@ int main(int argc, char *argv[])
             }
         }
 
-        // User entered a command
+        // User input
         if (fds[0].revents & POLLIN) {
             if (!fgets(input, INPUT_SIZE, stdin))
                 break;
 
             removeNewline(input);
 
-            // Built-in help command
             if (strcmp(input, "help") == 0) {
                 printHelp();
                 continue;
             }
 
-            // Handle client command
             int exitFlag = clientHandleInput(sock, input);
-
-            // Exit requested
             if (exitFlag == 1)
                 break;
         }
     }
 
-    // Cleanup and exit
+    // Cleanup
     close(sock);
     return 0;
 }

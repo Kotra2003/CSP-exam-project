@@ -4,33 +4,43 @@
 #include "protocol.h"
 #include "session.h"
 
-// Dispatch and process a single client command.
-// Sends the response to the client.
-// Returns 1 if the connection should be closed, 0 otherwise.
+// Main dispatcher for client commands.
+// Executes the requested operation and sends a response.
+// Returns 1 if the client connection should be closed.
 int processCommand(int clientFd, ProtocolMessage *msg, Session *session);
 
-// Authentication and session management
+// ============================================================
+// Authentication / session handling
+// ============================================================
 int handleLogin(int clientFd, ProtocolMessage *msg, Session *session);
 int handleCreateUser(int clientFd, ProtocolMessage *msg, Session *session);
 
-// User management extension (custom feature)
+// Extra command used for testing
 int handleDeleteUser(int clientFd, ProtocolMessage *msg, Session *session);
 
-// File and directory management commands
+// ============================================================
+// File and directory management
+// ============================================================
 int handleCreate(int clientFd, ProtocolMessage *msg, Session *session);
 int handleChmod(int clientFd, ProtocolMessage *msg, Session *session);
 int handleMove(int clientFd, ProtocolMessage *msg, Session *session);
 int handleDelete(int clientFd, ProtocolMessage *msg, Session *session);
 
+// ============================================================
 // Directory navigation and listing
+// ============================================================
 int handleCd(int clientFd, ProtocolMessage *msg, Session *session);
 int handleList(int clientFd, ProtocolMessage *msg, Session *session);
 
-// File I/O operations
+// ============================================================
+// File read / write operations
+// ============================================================
 int handleRead(int clientFd, ProtocolMessage *msg, Session *session);
 int handleWrite(int clientFd, ProtocolMessage *msg, Session *session);
 
-// File transfer operations
+// ============================================================
+// File transfer (client <-> server)
+// ============================================================
 int handleUpload(int clientFd, ProtocolMessage *msg, Session *session);
 int handleDownload(int clientFd, ProtocolMessage *msg, Session *session);
 

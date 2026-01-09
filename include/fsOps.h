@@ -3,24 +3,17 @@
 
 #include "session.h"
 
-// ============================================================
-// File locking primitives (fcntl-based)
-// ============================================================
-int lockFileRead(int fd);     // Acquire shared (read) lock
-int lockFileWrite(int fd);    // Acquire exclusive (write) lock
-int unlockFile(int fd);       // Release any lock
+// File locking (fcntl)
+int lockFileRead(int fd);     // shared lock
+int lockFileWrite(int fd);    // exclusive lock
+int unlockFile(int fd);       // unlock
 
-// ============================================================
-// Path resolution and sandbox enforcement
-// ============================================================
+// Path handling and sandbox checks
 int resolvePath(Session *s, const char *inputPath, char *outputPath);
 int isInsideRoot(const char *rootDir, const char *fullPath);
 int isInsideHome(const char *homeDir, const char *fullPath);
 
-// ============================================================
-// Filesystem operations
-// NOTE: These do NOT handle locking - caller must lock files
-// ============================================================
+// Filesystem operations (no locking here)
 int fsCreate(const char *path, int permissions, int isDirectory);
 int fsChmod(const char *path, int permissions);
 int fsMove(const char *src, const char *dst);

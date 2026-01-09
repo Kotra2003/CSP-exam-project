@@ -9,8 +9,8 @@
 #include <ctype.h>
 #include <errno.h>
 #include <poll.h>
-#include <grp.h>       // getgrnam
-#include <arpa/inet.h> // inet_pton, struct in_addr
+#include <grp.h>
+#include <arpa/inet.h> 
 
 #include "../../include/network.h"
 #include "../../include/protocol.h"

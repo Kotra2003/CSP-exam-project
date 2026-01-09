@@ -150,7 +150,7 @@ int resolvePath(Session *s, const char *inputPath, char *outputPath)
             snprintf(base, PATH_SIZE, "%s", gRootDir);
         }
     } else {
-        // Relative path → current working directory
+        // Relative path - current working directory
         snprintf(base, PATH_SIZE, "%s", s->currentDir);
     }
 
@@ -158,7 +158,7 @@ int resolvePath(Session *s, const char *inputPath, char *outputPath)
     // 2) Build full path before normalization
     // --------------------------------------------------------
     if (strcmp(inputPath, "/") == 0 || strcmp(inputPath, "") == 0) {
-        // Root or empty path → base directory
+        // Root or empty path - base directory
         strncpy(result, base, PATH_SIZE - 1);
         result[PATH_SIZE - 1] = '\0';
     }

@@ -1,18 +1,18 @@
-#include <stdio.h>      // Standard I/O (printf)
-#include <string.h>     // String manipulation (strncpy, strtok)
-#include <stdlib.h>     // Standard library functions
-#include <sys/socket.h> // Socket-related functions
-#include <unistd.h>     // POSIX API (fork, read, close)
-#include <signal.h>     // Signal handling
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <signal.h>
 
-#include "../../include/clientCommands.h" // Client command interface
-#include "../../include/protocol.h"       // Protocol definitions
-#include "../../include/network.h"        // Networking helpers
-#include "../../include/utils.h"          // Utility functions
+#include "../../include/clientCommands.h"
+#include "../../include/protocol.h"
+#include "../../include/network.h"
+#include "../../include/utils.h"
 
-// ============================================================================
-// ANSI color definitions for client UI output
-// ============================================================================
+// ============================================================
+// ANSI colors for client output
+// ============================================================
 #define RESET   "\033[0m"
 #define RED     "\033[31m"
 #define GREEN   "\033[32m"
@@ -20,62 +20,54 @@
 #define BLUE    "\033[34m"
 #define CYAN    "\033[36m"
 
-// Macros for formatted client messages
-#define ERROR(fmt, ...)   printf(RED    "[X] " fmt RESET "\n", ##__VA_ARGS__)
-#define SUCCESS(fmt, ...) printf(GREEN  "[OK] "    fmt RESET "\n", ##__VA_ARGS__)
+// Client message helpers
+#define ERROR(fmt, ...)   printf(RED "[X] " fmt RESET "\n", ##__VA_ARGS__)
+#define SUCCESS(fmt, ...) printf(GREEN "[OK] " fmt RESET "\n", ##__VA_ARGS__)
 #define SYNTAX(fmt, ...)  printf(YELLOW "[!] " fmt RESET "\n", ##__VA_ARGS__)
 
-// ============================================================================
-// External upload/download functions implemented in networkClient.c
-// ============================================================================
+// Upload / download helpers (implemented elsewhere)
 extern int uploadFile(int sock, const char *localPath, const char *remotePath);
 extern int downloadFile(int sock, const char *remotePath, const char *localPath);
 
-// ============================================================================
-// Global client state (local to this translation unit)
-// ============================================================================
-static const char *g_ip = NULL;     // Server IP address
-static int g_port = 0;              // Server port
-static char g_username[64] = "";    // Logged-in username (client-side only)
-static char g_currentPath[PATH_SIZE] = "/"; // Current virtual path for prompt
+// ============================================================
+// Client state
+// ============================================================
+static const char *g_ip = NULL;
+static int g_port = 0;
+static char g_username[64] = "";
+static char g_currentPath[PATH_SIZE] = "/";
 
-// Background process tracking (for async upload/download)
-static pid_t bgPids[128];           // PIDs of background processes
-static int bgCount = 0;             // Number of active background processes
+// Background process tracking
+static pid_t bgPids[128];
+static int bgCount = 0;
 
-// ============================================================================
-// Public helper functions
-// ============================================================================
-
-// Store server connection info for later reuse (e.g. background processes)
+// ============================================================
+// Public helpers
+// ============================================================
 void setGlobalServerInfo(const char *ip, int port)
 {
     g_ip = ip;
     g_port = port;
 }
 
-// Return current client-side path (used for prompt rendering)
 const char* getCurrentPath()
 {
     return g_currentPath;
 }
 
-// Return current username (empty string if not logged in)
 const char* getUsername()
 {
     return g_username;
 }
 
-// Update client-side current path after successful cd
 void updateCurrentPath(const char *newPath)
 {
     if (newPath && newPath[0] != '\0') {
         strncpy(g_currentPath, newPath, PATH_SIZE);
-        g_currentPath[PATH_SIZE - 1] = '\0'; // Ensure null-termination
+        g_currentPath[PATH_SIZE - 1] = '\0';
     }
 }
 
-// Register a background process PID
 void registerBackgroundProcess(pid_t pid)
 {
     if (bgCount < 128) {
@@ -83,7 +75,6 @@ void registerBackgroundProcess(pid_t pid)
     }
 }
 
-// Remove a background process PID when it finishes
 void unregisterBackgroundProcess(pid_t pid)
 {
     for (int i = 0; i < bgCount; i++) {
@@ -94,16 +85,15 @@ void unregisterBackgroundProcess(pid_t pid)
     }
 }
 
-// Check whether any background transfers are still running
 int hasActiveBackgroundProcesses(void)
 {
-    return (bgCount > 0);
+    return bgCount > 0;
 }
 
-// ============================================================================
-// Simple command tokenizer
-// Splits input string by spaces into tokens
-// ============================================================================
+
+// ============================================================
+// Simple tokenizer: splits input by spaces
+// ============================================================
 int tokenize(char *input, char *tokens[], int maxTokens)
 {
     int count = 0;
@@ -115,160 +105,131 @@ int tokenize(char *input, char *tokens[], int maxTokens)
     return count;
 }
 
-// ============================================================================
-// Client-side error explanation helper
-// This function does NOT affect the protocol or server logic.
-// It only prints user-friendly error messages on the client side.
-// ============================================================================
+// ============================================================
+// Prints client-side error messages for commands
+// Only affects UI, not server logic
+// ============================================================
 static void explainCommandError(const char *cmd,
                                 const char *a1,
                                 const char *a2,
                                 const char *a3)
 {
-    // Arguments are intentionally unused here.
-    // They are kept for future extensibility and interface consistency.
+    // Unused arguments (kept for consistency)
     (void)a1;
     (void)a2;
     (void)a3;
 
-    // Login command error handling
     if (strcmp(cmd, "login") == 0) {
-        ERROR("Login failed: user does not exist or you are already logged in.");
-        SYNTAX("Syntax: login <username>");
+        ERROR("Login failed.");
+        ERROR(" - You must NOT be logged in");
+        ERROR(" - User must exist");
+        SYNTAX("login <username>");
         return;
     }
 
-    // User creation error handling
     if (strcmp(cmd, "create_user") == 0) {
         ERROR("User creation failed.");
-        ERROR("Possible reasons:");
-        ERROR(" - user already exists");
-        ERROR(" - invalid permissions (must be octal, e.g. 700)");
-        SYNTAX("Syntax: create_user <username> <permissions>");
+        ERROR(" - User already exists");
+        ERROR(" - Invalid permissions");
+        ERROR(" - You must NOT be logged in");
+        SYNTAX("create_user <username> <permissions>");
         return;
     }
 
-    // User deletion error handling
     if (strcmp(cmd, "delete_user") == 0) {
         ERROR("User deletion failed.");
-        ERROR("You must NOT be logged in and the user must exist.");
-        SYNTAX("Syntax: delete_user <username>");
+        ERROR(" - User does not exist");
+        ERROR(" - You must NOT be logged in");
+        SYNTAX("delete_user <username>");
         return;
     }
 
-    // Change directory error handling
     if (strcmp(cmd, "cd") == 0) {
-        ERROR("Change directory failed.");
-        ERROR("Possible reasons:");
-        ERROR(" - directory does not exist");
-        ERROR(" - directory is outside your home directory");
-        SYNTAX("Syntax: cd <directory>");
+        ERROR("Cannot change directory.");
+        ERROR(" - Invalid permissions");
+        ERROR(" - Invalid path");
+        SYNTAX("cd <directory>");
         return;
     }
 
-    // List command error handling
     if (strcmp(cmd, "list") == 0) {
-        ERROR("List command failed.");
-        ERROR("Possible reasons:");
-        ERROR(" - directory does not exist");
-        ERROR(" - invalid path");
-        SYNTAX("Syntax: list [path]");
+        ERROR("List failed.");
+        ERROR(" - Invalid path");
+        SYNTAX("list [path]");
         return;
     }
 
-    // Create file/directory error handling
     if (strcmp(cmd, "create") == 0) {
-        ERROR("Create operation failed.");
-        ERROR("Possible reasons:");
-        ERROR(" - file or directory already exists");
-        ERROR(" - invalid permissions (0–777, octal)");
-        ERROR(" - invalid path");
-        SYNTAX("Syntax: create <path> <permissions> [-d]");
+        ERROR("Create failed.");
+        ERROR(" - Invalid permissions");
+        ERROR(" - Invalid path");
+        ERROR(" - File/folder already exists");
+        SYNTAX("create <path> <permissions> [-d]");
         return;
     }
 
-    // Chmod error handling
     if (strcmp(cmd, "chmod") == 0) {
-        ERROR("Permission change failed.");
-        ERROR("Possible reasons:");
-        ERROR(" - file does not exist");
-        ERROR(" - invalid permission value (octal)");
-        SYNTAX("Syntax: chmod <path> <permissions>");
+        ERROR("Chmod failed.");
+        ERROR(" - Invalid permissions");
+        ERROR(" - Invalid path");
+        SYNTAX("chmod <path> <permissions>");
         return;
     }
 
-    // Move/rename error handling
     if (strcmp(cmd, "move") == 0) {
-        ERROR("Move operation failed.");
-        ERROR("Possible reasons:");
-        ERROR(" - source does not exist");
-        ERROR(" - destination already exists");
-        ERROR(" - invalid path");
-        SYNTAX("Syntax: move <source> <destination>");
+        ERROR("Move failed.");
+        ERROR(" - Invalid path");
+        SYNTAX("move <source> <destination>");
         return;
     }
 
-    // Delete error handling
     if (strcmp(cmd, "delete") == 0) {
-        ERROR("Delete operation failed.");
-        ERROR("Possible reasons:");
-        ERROR(" - file or directory does not exist");
-        SYNTAX("Syntax: delete <path>");
+        ERROR("Delete failed.");
+        ERROR(" - File/folder does not exist");
+        SYNTAX("delete <path>");
         return;
     }
 
-    // Read error handling
     if (strcmp(cmd, "read") == 0) {
-        ERROR("Read operation failed.");
-        ERROR("Possible reasons:");
-        ERROR(" - file does not exist");
-        ERROR(" - invalid offset");
-        SYNTAX("Syntax: read <path>");
-        SYNTAX("        read -offset=N <path>");
+        ERROR("Read failed.");
+        ERROR(" - Invalid path");
+        SYNTAX("read <path>");
+        SYNTAX("read -offset=N <path>");
         return;
     }
 
-    // Write error handling
     if (strcmp(cmd, "write") == 0) {
-        ERROR("Write operation failed.");
-        ERROR("Possible reasons:");
-        ERROR(" - invalid path");
-        ERROR(" - invalid offset");
-        SYNTAX("Syntax: write <path>");
-        SYNTAX("        write -offset=N <path>");
+        ERROR("Write failed.");
+        ERROR(" - Invalid path");
+        SYNTAX("write <path>");
+        SYNTAX("write -offset=N <path>");
         return;
     }
 
-    // Upload error handling
     if (strcmp(cmd, "upload") == 0) {
         ERROR("Upload failed.");
-        ERROR("Possible reasons:");
-        ERROR(" - local file does not exist");
-        ERROR(" - invalid remote path");
-        SYNTAX("Syntax: upload <local> <remote>");
-        SYNTAX("        upload -b <local> <remote>");
+        ERROR(" - Invalid paths");
+        SYNTAX("upload <local> <remote>");
+        SYNTAX("upload -b <local> <remote>");
         return;
     }
 
-    // Download error handling
     if (strcmp(cmd, "download") == 0) {
         ERROR("Download failed.");
-        ERROR("Possible reasons:");
-        ERROR(" - remote file does not exist");
-        SYNTAX("Syntax: download <remote> <local>");
-        SYNTAX("        download -b <remote> <local>");
+        ERROR(" - Invalid paths");
+        SYNTAX("download <remote> <local>");
+        SYNTAX("download -b <remote> <local>");
         return;
     }
 
-    // Fallback for unknown command errors
-    ERROR("Command failed due to an unknown error.");
-    ERROR("Tip: check command syntax and arguments.");
+    ERROR("Unknown command error.");
 }
 
-// ============================================================================
-// Send a simple command without payload data
-// Used for commands like login, create, delete, chmod, etc.
-// ============================================================================
+
+// ============================================================
+// Send a command without extra data
+// Used for simple commands (login, create, delete, chmod, ...)
+ // ============================================================
 static int sendSimpleCommand(int sock, int cmd,
                              const char *arg1,
                              const char *arg2,
@@ -276,49 +237,47 @@ static int sendSimpleCommand(int sock, int cmd,
 {
     ProtocolMessage msg;
 
-    // Clear the message structure
+    // Initialize message
     memset(&msg, 0, sizeof(msg));
     msg.command = cmd;
 
-    // Copy arguments if provided
+    // Copy arguments if present
     if (arg1) strncpy(msg.arg1, arg1, ARG_SIZE);
     if (arg2) strncpy(msg.arg2, arg2, ARG_SIZE);
     if (arg3) strncpy(msg.arg3, arg3, ARG_SIZE);
 
-    // Send request to server
+    // Send request
     sendMessage(sock, &msg);
 
-    // Receive server response
+    // Receive response
     ProtocolResponse res;
     if (receiveResponse(sock, &res) < 0) {
-        ERROR("No response from server (connection issue?)");
+        ERROR("No response from server");
         return -1;
     }
 
-    // On success return dataSize, otherwise signal error
+    // Return data size on success
     return (res.status == STATUS_OK ? res.dataSize : -1);
 }
 
-// ============================================================================
-// Helper: Background login
-// Used by background upload/download processes to authenticate
-// ============================================================================
+// ============================================================
+// Login helper for background processes
+// ============================================================
 static int backgroundLogin(int bgSock)
 {
-    // Background operations require an already logged-in user
+    // Background jobs require an existing login
     if (strlen(g_username) == 0)
         return -1;
 
-    // Prepare login message using existing client username
     ProtocolMessage loginMsg;
     memset(&loginMsg, 0, sizeof(loginMsg));
     loginMsg.command = CMD_LOGIN;
     strncpy(loginMsg.arg1, g_username, ARG_SIZE);
 
-    // Send login request to server
+    // Send login request
     sendMessage(bgSock, &loginMsg);
 
-    // Wait for server response
+    // Wait for reply
     ProtocolResponse lr;
     if (receiveResponse(bgSock, &lr) < 0 || lr.status != STATUS_OK) {
         return -1;
@@ -327,141 +286,123 @@ static int backgroundLogin(int bgSock)
     return 0;
 }
 
-// ============================================================================
-// Background upload handler
-// Runs upload operation in a separate process
-// ============================================================================
+// ============================================================
+// Start upload in background process
+// ============================================================
 static void startBackgroundUpload(const char *local, const char *remote)
 {
-    // Fork a new process for background execution
     pid_t pid = fork();
     if (pid < 0) {
         ERROR("Cannot fork background upload");
         return;
     }
 
-    // Parent process: register background job and return immediately
+    // Parent: register job and return
     if (pid > 0) {
         registerBackgroundProcess(pid);
         printf(YELLOW "[BG] Upload started (PID=%d): %s -> %s\n" RESET, pid, local, remote);
-        printf(YELLOW "[BG] Running in background (sleep 5s for demo)...\n" RESET);
         return;
     }
 
-    // ------------------------------------------------------------------------
-    // Child process: perform the background upload
-    // ------------------------------------------------------------------------
+    // Child process
 
     // Detach from terminal input
     close(STDIN_FILENO);
 
-    // Ignore signals that could terminate the background job
+    // Ignore signals in background
     signal(SIGINT, SIG_IGN);
     signal(SIGTERM, SIG_IGN);
 
-    // Just to not finish imidiatly so we can try exit
-    printf(YELLOW "[BG PID=%d] Starting upload in 5 seconds...\n" RESET, getpid());
+    // Small delay for testing exit behavior
     sleep(5);
 
-    // Create a new connection to the server
+    // New server connection
     int bgSock = connectToServer(g_ip, g_port);
     if (bgSock < 0) {
         _exit(1);
     }
 
-    // Authenticate using background login helper
+    // Authenticate
     if (backgroundLogin(bgSock) < 0) {
         close(bgSock);
         _exit(1);
     }
 
-    // Perform the upload operation
-    printf(YELLOW "[BG PID=%d] Uploading %s -> %s...\n" RESET, getpid(), local, remote);
-
+    // Run upload
     int result = uploadFile(bgSock, local, remote);
     close(bgSock);
 
-    // Report result of background upload
+    // Print result
     if (result == 0) {
         printf(YELLOW "[Background] Command: upload %s %s concluded\n" RESET, remote, local);
     } else {
         printf(YELLOW "[Background] Command: upload %s %s FAILED\n" RESET, remote, local);
     }
 
-    // Ensure output is flushed before exiting child process
     fflush(stdout);
     _exit(0);
 }
-// ============================================================================
-// Background download handler
-// Runs download operation in a separate process
-// ============================================================================
+
+// ============================================================
+// Start download in background process
+// ============================================================
 static void startBackgroundDownload(const char *remote, const char *local)
 {
-    // Fork a new process for background execution
     pid_t pid = fork();
     if (pid < 0) {
         ERROR("Cannot fork background download");
         return;
     }
 
-    // Parent process: register background job and return immediately
+    // Parent: register job and return
     if (pid > 0) {
         registerBackgroundProcess(pid);
         printf(YELLOW "[BG] Download started (PID=%d): %s -> %s\n" RESET, pid, remote, local);
-        printf(YELLOW "[BG] Running in background (sleep 5s for demo)...\n" RESET);
         return;
     }
 
-    // ------------------------------------------------------------------------
-    // Child process: perform the background download
-    // ------------------------------------------------------------------------
+    // Child process
 
     // Detach from terminal input
     close(STDIN_FILENO);
 
-    // Ignore signals that could interrupt the background job
+    // Ignore signals in background
     signal(SIGINT, SIG_IGN);
     signal(SIGTERM, SIG_IGN);
 
-    // Just to have enogh time to try exit or any other command
-    printf(YELLOW "[BG PID=%d] Starting download in 5 seconds...\n" RESET, getpid());
+    // Small delay for testing exit behavior
     sleep(5);
 
-    // Create a new connection to the server
+    // New server connection
     int bgSock = connectToServer(g_ip, g_port);
     if (bgSock < 0) {
         _exit(1);
     }
 
-    // Authenticate using background login helper
+    // Authenticate
     if (backgroundLogin(bgSock) < 0) {
         close(bgSock);
         _exit(1);
     }
 
-    // Perform the download operation
-    printf(YELLOW "[BG PID=%d] Downloading %s -> %s...\n" RESET, getpid(), remote, local);
-
+    // Run download
     int result = downloadFile(bgSock, remote, local);
     close(bgSock);
 
-    // Report result of background download
+    // Print result
     if (result == 0) {
         printf(YELLOW "[Background] Command: download %s %s concluded\n" RESET, remote, local);
     } else {
         printf(YELLOW "[Background] Command: download %s %s FAILED\n" RESET, remote, local);
     }
 
-    // Ensure output is flushed before exiting child process
     fflush(stdout);
     _exit(0);
 }
 
-// ============================================================================
+// ============================================================
 // Main client command handler
-// Parses input, sends requests to the server and handles responses
-// ============================================================================
+// ============================================================
 int clientHandleInput(int sock, char *input)
 {
     char *tokens[10];
@@ -470,37 +411,34 @@ int clientHandleInput(int sock, char *input)
 
     char *cmd = tokens[0];
 
-    // -----------------------------------------------------------
-    // LOGIN command
-    // -----------------------------------------------------------
+    // ----------------------------
+    // LOGIN
+    // ----------------------------
     if (strcmp(cmd, "login") == 0) {
         if (n < 2) {
             SYNTAX("Syntax: login <username>");
             return 0;
         }
 
-        // Send login request to the server
         if (sendSimpleCommand(sock, CMD_LOGIN, tokens[1], NULL, NULL) >= 0) {
             SUCCESS("Logged in as %s", tokens[1]);
             strncpy(g_username, tokens[1], sizeof(g_username));
             strcpy(g_currentPath, "/");
-        }
-        else {
+        } else {
             explainCommandError("login", tokens[1], NULL, NULL);
         }
         return 0;
     }
 
-    // -----------------------------------------------------------
-    // CREATE USER command
-    // -----------------------------------------------------------
+    // ----------------------------
+    // CREATE USER
+    // ----------------------------
     if (strcmp(cmd, "create_user") == 0) {
         if (n < 3) {
             SYNTAX("Syntax: create_user <username> <permissions>");
             return 0;
         }
 
-        // Send user creation request
         if (sendSimpleCommand(sock, CMD_CREATE_USER, tokens[1], tokens[2], NULL) >= 0)
             SUCCESS("User %s created", tokens[1]);
         else
@@ -509,16 +447,15 @@ int clientHandleInput(int sock, char *input)
         return 0;
     }
 
-    // -----------------------------------------------------------
-    // DELETE USER command
-    // -----------------------------------------------------------
+    // ----------------------------
+    // DELETE USER
+    // ----------------------------
     if (strcmp(cmd, "delete_user") == 0) {
         if (n < 2) {
             SYNTAX("Syntax: delete_user <username>");
             return 0;
         }
 
-        // Send user deletion request
         if (sendSimpleCommand(sock, CMD_DELETE_USER, tokens[1], NULL, NULL) >= 0)
             SUCCESS("User %s deleted", tokens[1]);
         else
@@ -527,17 +464,15 @@ int clientHandleInput(int sock, char *input)
         return 0;
     }
 
-    // -----------------------------------------------------------
-    // CD command
-    // -----------------------------------------------------------
+    // ----------------------------
+    // CD
+    // ----------------------------
     if (strcmp(cmd, "cd") == 0) {
-        // Check syntax
         if (n < 2) {
             SYNTAX("Syntax: cd <directory>");
             return 0;
         }
 
-        // Build and send CD request
         ProtocolMessage msg;
         memset(&msg, 0, sizeof(msg));
         msg.command = CMD_CD;
@@ -545,20 +480,18 @@ int clientHandleInput(int sock, char *input)
 
         sendMessage(sock, &msg);
 
-        // Receive server response
         ProtocolResponse res;
         if (receiveResponse(sock, &res) < 0) {
             SYNTAX("No response from server");
             return 0;
         }
 
-        // Handle error response
         if (res.status != STATUS_OK) {
             explainCommandError("cd", tokens[1], NULL, NULL);
             return 0;
         }
 
-        // Server sends new current path on success
+        // Update path returned by server
         if (res.dataSize > 0) {
             char newPath[PATH_SIZE];
             if (res.dataSize < PATH_SIZE) {
@@ -571,22 +504,18 @@ int clientHandleInput(int sock, char *input)
         return 0;
     }
 
-    // -----------------------------------------------------------
-    // LIST command
-    // -----------------------------------------------------------
+    // ----------------------------
+    // LIST
+    // ----------------------------
     if (strcmp(cmd, "list") == 0) {
-        // Optional path argument
         const char *path = (n >= 2 ? tokens[1] : "");
 
-        // Send LIST request and get expected data size
         int dataSize = sendSimpleCommand(sock, CMD_LIST, path, NULL, NULL);
-
         if (dataSize < 0) {
             explainCommandError("list", path, NULL, NULL);
             return 0;
         }
 
-        // Receive directory listing from server
         char *buffer = malloc(dataSize + 1);
         recvAll(sock, buffer, dataSize);
         buffer[dataSize] = '\0';

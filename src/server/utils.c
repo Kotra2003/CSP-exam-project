@@ -82,7 +82,7 @@ int removeRecursive(const char *path)
         return -1;
     }
 
-    // If not a directory → remove as a regular file
+    // If not a directory - remove as a regular file
     if (!S_ISDIR(st.st_mode)) {
         if (unlink(path) < 0) {
             perror("unlink");
@@ -91,7 +91,7 @@ int removeRecursive(const char *path)
         return 0;
     }
 
-    // Directory → iterate over contents
+    // Directory - iterate over contents
     DIR *dir = opendir(path);
     if (!dir) {
         perror("opendir");
